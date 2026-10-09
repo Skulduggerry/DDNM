@@ -74,6 +74,15 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
     return betas
 
 
+def shifted_repeat(vec, repeat_cnt=4, shift=1):
+    b, c, h, w = vec.shape
+    size = w - (repeat_cnt - 1) * shift
+    patches = vec.unfold(2, size, shift).unfold(3, size, shift)
+    patches = patches.permute(0, 1, 2, 4, 3, 5)
+    out = patches.reshape(1, 3, size*repeat_cnt, size*repeat_cnt)
+    return out
+
+
 class Diffusion(object):
     def __init__(self, args, config, device=None):
         self.args = args
@@ -276,10 +285,9 @@ class Diffusion(object):
             # =========================
 
             # repeat image
-            # TODO shift images slightly
-            # TODO adjust pseudo inverse to use IBP
             repeat_cnt = 4
-            A1 = lambda z: torch.Tensor.repeat(z, (1, 1, repeat_cnt, repeat_cnt)).
+            shift=10
+            A1 = lambda z: shifted_repeat(z, repeat_cnt, shift)
             A1p = lambda z: z[:,:,:256,:256]
 
             # TODO pseudoinverse of gaussian blur -> maybe not needed
@@ -293,8 +301,8 @@ class Diffusion(object):
 
             # TODO add noise
 
-            A = lambda z: A3(A2(A1(z)))
-            Ap = lambda z: A1p(A2p(A3p(z)))
+            A = lambda z: A3(A1(z))
+            Ap = lambda z: A1p(A3p(z)) #lambda z: A1p(A2p(A3p(z)))
         else:
             raise NotImplementedError("degradation type not supported")
 
