@@ -8,7 +8,7 @@ data:
     gaussian_dequantization: false
     random_flip: true
     rescaled: true
-    num_workers: 32
+    num_workers: 0
     out_of_dist: true
 
 model:

@@ -41,8 +41,6 @@ def gray2color(x):
     base = coef**2 + coef**2 + coef**2
     return torch.stack((x*coef/base, x*coef/base, x*coef/base), 1)    
 
-
-
 def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_timesteps):
     def sigmoid(x):
         return 1 / (np.exp(-x) + 1)
@@ -273,19 +271,28 @@ class Diffusion(object):
             A = lambda z: A3(A2(A1(z)))
             Ap = lambda z: A1p(A2p(A3p(z)))
         elif args.deg =='diy':
-            # design your own degradation
-            loaded = np.load("exp/inp_masks/mask.npy")
-            mask = torch.from_numpy(loaded).to(self.device)
-            A1 = lambda z: z*mask
-            A1p = A1
-            
-            A2 = lambda z: color2gray(z)
-            A2p = lambda z: gray2color(z)
-            
-            scale=args.deg_scale
-            A3 = torch.nn.AdaptiveAvgPool2d((256//scale,256//scale))
-            A3p = lambda z: MeanUpsample(z,scale)
-            
+            # =========================
+            # FELIX'S CODE
+            # =========================
+
+            # repeat image
+            # TODO shift images slightly
+            # TODO adjust pseudo inverse to use IBP
+            repeat_cnt = 4
+            A1 = lambda z: torch.Tensor.repeat(z, (1, 1, repeat_cnt, repeat_cnt)).
+            A1p = lambda z: z[:,:,:256,:256]
+
+            # TODO pseudoinverse of gaussian blur -> maybe not needed
+            import torchvision
+            A2 = lambda z: torchvision.transforms.GaussianBlur([5, 5], sigma=3).forward(z)
+            A2p = lambda z: z
+
+            # downscale image back to 256*256
+            A3 = torch.nn.AdaptiveAvgPool2d((256, 256))
+            A3p = lambda z: MeanUpsample(z,repeat_cnt)
+
+            # TODO add noise
+
             A = lambda z: A3(A2(A1(z)))
             Ap = lambda z: A1p(A2p(A3p(z)))
         else:
@@ -313,12 +320,16 @@ class Diffusion(object):
             os.makedirs(os.path.join(self.args.image_folder, "Apy"), exist_ok=True)
             for i in range(len(Apy)):
                 tvu.save_image(
+                    inverse_data_transform(config, y[i]),
+                    os.path.join(self.args.image_folder, f"Apy/{idx_so_far + i}_y.png")
+                )               
+                tvu.save_image(
                     inverse_data_transform(config, Apy[i]),
-                    os.path.join(self.args.image_folder, f"Apy/Apy_{idx_so_far + i}.png")
+                    os.path.join(self.args.image_folder, f"Apy/{idx_so_far + i}_Apy.png")
                 )
                 tvu.save_image(
                     inverse_data_transform(config, x_orig[i]),
-                    os.path.join(self.args.image_folder, f"Apy/orig_{idx_so_far + i}.png")
+                    os.path.join(self.args.image_folder, f"Apy/{idx_so_far + i}_orig.png")
                 )
                 
             # init x_T
