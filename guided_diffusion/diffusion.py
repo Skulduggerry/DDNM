@@ -75,6 +75,9 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
 
 
 def shifted_repeat(vec, repeat_cnt=4, shift=1):
+    # =========================
+    # FELIX'S CODE
+    # =========================
     b, c, h, w = vec.shape
     size = w - (repeat_cnt - 1) * shift
     patches = vec.unfold(2, size, shift).unfold(3, size, shift)
