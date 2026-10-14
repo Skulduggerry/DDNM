@@ -4,9 +4,12 @@ import time
 import glob
 
 import numpy as np
+import torchmin
+import torchvision
 import tqdm
 import torch
 import torch.utils.data as data
+from sympy.tensor import tensor
 
 from datasets import get_dataset, data_transform, inverse_data_transform
 from functions.ckpt_util import get_ckpt_path, download
@@ -24,22 +27,26 @@ from scipy.linalg import orth
 def get_gaussian_noisy_img(img, noise_level):
     return img + torch.randn_like(img).cuda() * noise_level
 
+
 def MeanUpsample(x, scale):
     n, c, h, w = x.shape
-    out = torch.zeros(n, c, h, scale, w, scale).to(x.device) + x.view(n,c,h,1,w,1)
-    out = out.view(n, c, scale*h, scale*w)
+    out = torch.zeros(n, c, h, scale, w, scale).to(x.device) + x.view(n, c, h, 1, w, 1)
+    out = out.view(n, c, scale * h, scale * w)
     return out
 
+
 def color2gray(x):
-    coef=1/3
-    x = x[:,0,:,:] * coef + x[:,1,:,:]*coef +  x[:,2,:,:]*coef
-    return x.repeat(1,3,1,1)
+    coef = 1 / 3
+    x = x[:, 0, :, :] * coef + x[:, 1, :, :] * coef + x[:, 2, :, :] * coef
+    return x.repeat(1, 3, 1, 1)
+
 
 def gray2color(x):
-    x = x[:,0,:,:]
-    coef=1/3
-    base = coef**2 + coef**2 + coef**2
-    return torch.stack((x*coef/base, x*coef/base, x*coef/base), 1)    
+    x = x[:, 0, :, :]
+    coef = 1 / 3
+    base = coef ** 2 + coef ** 2 + coef ** 2
+    return torch.stack((x * coef / base, x * coef / base, x * coef / base), 1)
+
 
 def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_timesteps):
     def sigmoid(x):
@@ -47,13 +54,13 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
 
     if beta_schedule == "quad":
         betas = (
-            np.linspace(
-                beta_start ** 0.5,
-                beta_end ** 0.5,
-                num_diffusion_timesteps,
-                dtype=np.float64,
-            )
-            ** 2
+                np.linspace(
+                    beta_start ** 0.5,
+                    beta_end ** 0.5,
+                    num_diffusion_timesteps,
+                    dtype=np.float64,
+                )
+                ** 2
         )
     elif beta_schedule == "linear":
         betas = np.linspace(
@@ -61,7 +68,7 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
         )
     elif beta_schedule == "const":
         betas = beta_end * np.ones(num_diffusion_timesteps, dtype=np.float64)
-    elif beta_schedule == "jsd":  
+    elif beta_schedule == "jsd":
         betas = 1.0 / np.linspace(
             num_diffusion_timesteps, 1, num_diffusion_timesteps, dtype=np.float64
         )
@@ -82,9 +89,27 @@ def shifted_repeat(vec, repeat_cnt=4, shift=1):
     size = w - (repeat_cnt - 1) * shift
     patches = vec.unfold(2, size, shift).unfold(3, size, shift)
     patches = patches.permute(0, 1, 2, 4, 3, 5)
-    out = patches.reshape(1, 3, size*repeat_cnt, size*repeat_cnt)
+    out = patches.reshape(1, 3, size * repeat_cnt, size * repeat_cnt)
     return out
 
+def apply_A(x, repeat_cnt=4, shift=10):
+    # =========================
+    # FELIX'S CODE
+    # =========================
+    shifted = shifted_repeat(x, repeat_cnt, shift)
+    blurred = torchvision.transforms.GaussianBlur([5, 5], sigma=3).forward(shifted)
+    downsampled = torch.nn.AdaptiveAvgPool2d((256, 256)).forward(blurred)
+    return downsampled
+
+def apply_Ap_cg(y):
+    # =========================
+    # FELIX'S CODE
+    # =========================
+    def fn(x):
+        diff = (apply_A(x) - y) ** 2
+        return diff.sum()
+    x0 = torch.zeros((1, 3, 256, 256), device=y.device, requires_grad=True)
+    return torchmin.minimize(fn, x0, method='cg').x
 
 class Diffusion(object):
     def __init__(self, args, config, device=None):
@@ -115,7 +140,7 @@ class Diffusion(object):
         )
         self.alphas_cumprod_prev = alphas_cumprod_prev
         posterior_variance = (
-            betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
+                betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
         )
         if self.model_var_type == "fixedlarge":
             self.logvar = betas.log()
@@ -156,11 +181,11 @@ class Diffusion(object):
                 model.convert_to_fp16()
             if self.config.model.class_cond:
                 ckpt = os.path.join(self.args.exp, 'logs/imagenet/%dx%d_diffusion.pt' % (
-                self.config.data.image_size, self.config.data.image_size))
+                    self.config.data.image_size, self.config.data.image_size))
                 if not os.path.exists(ckpt):
                     download(
                         'https://openaipublic.blob.core.windows.net/diffusion/jul-2021/%dx%d_diffusion_uncond.pt' % (
-                        self.config.data.image_size, self.config.data.image_size), ckpt)
+                            self.config.data.image_size, self.config.data.image_size), ckpt)
             else:
                 ckpt = os.path.join(self.args.exp, "logs/imagenet/256x256_diffusion_uncond.pt")
                 if not os.path.exists(ckpt):
@@ -175,7 +200,7 @@ class Diffusion(object):
 
             if self.config.model.class_cond:
                 ckpt = os.path.join(self.args.exp, 'logs/imagenet/%dx%d_classifier.pt' % (
-                self.config.data.image_size, self.config.data.image_size))
+                    self.config.data.image_size, self.config.data.image_size))
                 if not os.path.exists(ckpt):
                     image_size = self.config.data.image_size
                     download(
@@ -206,7 +231,7 @@ class Diffusion(object):
                   f'travel_length = {self.config.time_travel.travel_length},',
                   f'travel_repeat = {self.config.time_travel.travel_repeat}.',
                   f'Task: {self.args.deg}.'
-                 )
+                  )
             self.simplified_ddnm_plus(model, cls_fn)
         else:
             print('Run SVD-based DDNM.',
@@ -214,10 +239,9 @@ class Diffusion(object):
                   f'travel_length = {self.config.time_travel.travel_length},',
                   f'travel_repeat = {self.config.time_travel.travel_repeat}.',
                   f'Task: {self.args.deg}.'
-                 )
+                  )
             self.svd_based_ddnm_plus(model, cls_fn)
-            
-            
+
     def simplified_ddnm_plus(self, model, cls_fn):
         args, config = self.args, self.config
 
@@ -251,28 +275,28 @@ class Diffusion(object):
         )
 
         # get degradation operator
-        print("args.deg:",args.deg)
-        if args.deg =='colorization':
+        print("args.deg:", args.deg)
+        if args.deg == 'colorization':
             A = lambda z: color2gray(z)
             Ap = lambda z: gray2color(z)
-        elif args.deg =='denoising':
+        elif args.deg == 'denoising':
             A = lambda z: z
             Ap = A
-        elif args.deg =='sr_averagepooling':
-            scale=round(args.deg_scale)
-            A = torch.nn.AdaptiveAvgPool2d((256//scale,256//scale))
-            Ap = lambda z: MeanUpsample(z,scale)
-        elif args.deg =='inpainting':
+        elif args.deg == 'sr_averagepooling':
+            scale = round(args.deg_scale)
+            A = torch.nn.AdaptiveAvgPool2d((256 // scale, 256 // scale))
+            Ap = lambda z: MeanUpsample(z, scale)
+        elif args.deg == 'inpainting':
             loaded = np.load("exp/inp_masks/mask.npy")
             mask = torch.from_numpy(loaded).to(self.device)
-            A = lambda z: z*mask
+            A = lambda z: z * mask
             Ap = A
-        elif args.deg =='mask_color_sr':
+        elif args.deg == 'mask_color_sr':
             loaded = np.load("exp/inp_masks/mask.npy")
             mask = torch.from_numpy(loaded).to(self.device)
-            A1 = lambda z: z*mask
+            A1 = lambda z: z * mask
             A1p = A1
-            
+
             A2 = lambda z: color2gray(z)
             A2p = lambda z: gray2color(z)
             
@@ -288,30 +312,30 @@ class Diffusion(object):
             # =========================
 
             # repeat image
-            repeat_cnt = 4
-            shift=10
-            A1 = lambda z: shifted_repeat(z, repeat_cnt, shift)
-            A1p = lambda z: z[:,:,:256,:256]
+            # repeat_cnt = 4
+            # shift = 10
+            # A1 = lambda z: shifted_repeat(z, repeat_cnt, shift)
+            # A1p = lambda z: z[:, :, :256, :256]
 
             # TODO pseudoinverse of gaussian blur -> maybe not needed
-            import torchvision
-            A2 = lambda z: torchvision.transforms.GaussianBlur([5, 5], sigma=3).forward(z)
-            A2p = lambda z: z
+            # import torchvision
+            # A2 = lambda z: torchvision.transforms.GaussianBlur([5, 5], sigma=3).forward(z)
+            # A2p = lambda z: z
 
             # downscale image back to 256*256
-            A3 = torch.nn.AdaptiveAvgPool2d((256, 256))
-            A3p = lambda z: MeanUpsample(z,repeat_cnt)
+            # A3 = torch.nn.AdaptiveAvgPool2d((256, 256))
+            # A3p = lambda z: MeanUpsample(z, repeat_cnt)
 
             # TODO add noise
 
-            A = lambda z: A3(A1(z))
-            Ap = lambda z: A1p(A3p(z)) #lambda z: A1p(A2p(A3p(z)))
+            A = lambda x: apply_A(x)
+            Ap = lambda y: apply_Ap_cg(y)
         else:
             raise NotImplementedError("degradation type not supported")
 
-        args.sigma_y = 2 * args.sigma_y #to account for scaling to [-1,1]
+        args.sigma_y = 2 * args.sigma_y  # to account for scaling to [-1,1]
         sigma_y = args.sigma_y
-        
+
         print(f'Start from {args.subset_start}')
         idx_init = args.subset_start
         idx_so_far = args.subset_start
@@ -323,7 +347,7 @@ class Diffusion(object):
 
             y = A(x_orig)
 
-            if config.sampling.batch_size!=1:
+            if config.sampling.batch_size != 1:
                 raise ValueError("please change the config file to set batch size as 1")
 
             Apy = Ap(y)
@@ -333,7 +357,7 @@ class Diffusion(object):
                 tvu.save_image(
                     inverse_data_transform(config, y[i]),
                     os.path.join(self.args.image_folder, f"Apy/{idx_so_far + i}_y.png")
-                )               
+                )
                 tvu.save_image(
                     inverse_data_transform(config, Apy[i]),
                     os.path.join(self.args.image_folder, f"Apy/{idx_so_far + i}_Apy.png")
@@ -342,7 +366,7 @@ class Diffusion(object):
                     inverse_data_transform(config, x_orig[i]),
                     os.path.join(self.args.image_folder, f"Apy/{idx_so_far + i}_orig.png")
                 )
-                
+
             # init x_T
             x = torch.randn(
                 y.shape[0],
@@ -353,29 +377,28 @@ class Diffusion(object):
             )
 
             with torch.no_grad():
-                skip = config.diffusion.num_diffusion_timesteps//config.time_travel.T_sampling
+                skip = config.diffusion.num_diffusion_timesteps // config.time_travel.T_sampling
                 n = x.size(0)
                 x0_preds = []
                 xs = [x]
-                
-                times = get_schedule_jump(config.time_travel.T_sampling, 
-                                               config.time_travel.travel_length, 
-                                               config.time_travel.travel_repeat,
-                                              )
+
+                times = get_schedule_jump(config.time_travel.T_sampling,
+                                          config.time_travel.travel_length,
+                                          config.time_travel.travel_repeat,
+                                          )
                 time_pairs = list(zip(times[:-1], times[1:]))
-                
-                
+
                 # reverse diffusion sampling
                 for i, j in tqdm.tqdm(time_pairs):
-                    i, j = i*skip, j*skip
-                    if j<0: j=-1 
+                    i, j = i * skip, j * skip
+                    if j < 0: j = -1
 
-                    if j < i: # normal sampling 
+                    if j < i:  # normal sampling
                         t = (torch.ones(n) * i).to(x.device)
                         next_t = (torch.ones(n) * j).to(x.device)
                         at = compute_alpha(self.betas, t.long())
                         at_next = compute_alpha(self.betas, next_t.long())
-                        sigma_t = (1 - at_next**2).sqrt()
+                        sigma_t = (1 - at_next ** 2).sqrt()
                         xt = xs[-1].to('cuda')
 
                         et = model(xt, t)
@@ -387,15 +410,15 @@ class Diffusion(object):
                         x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
 
                         # Eq. 19
-                        if sigma_t >= at_next*sigma_y:
+                        if sigma_t >= at_next * sigma_y:
                             lambda_t = 1.
-                            gamma_t = (sigma_t**2 - (at_next*sigma_y)**2).sqrt()
+                            gamma_t = (sigma_t ** 2 - (at_next * sigma_y) ** 2).sqrt()
                         else:
-                            lambda_t = (sigma_t)/(at_next*sigma_y)
+                            lambda_t = (sigma_t) / (at_next * sigma_y)
                             gamma_t = 0.
 
                         # Eq. 17
-                        x0_t_hat = x0_t - lambda_t*Ap(A(x0_t) - y)
+                        x0_t_hat = x0_t - lambda_t * Ap(A(x0_t) - y)
 
                         eta = self.args.eta
 
@@ -406,8 +429,8 @@ class Diffusion(object):
                         xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (c1 * torch.randn_like(x0_t) + c2 * et)
 
                         x0_preds.append(x0_t.to('cpu'))
-                        xs.append(xt_next.to('cpu'))    
-                    else: # time-travel back
+                        xs.append(xt_next.to('cpu'))
+                    else:  # time-travel back
                         next_t = (torch.ones(n) * j).to(x.device)
                         at_next = compute_alpha(self.betas, next_t.long())
                         x0_t = x0_preds[-1].to('cuda')
@@ -417,7 +440,7 @@ class Diffusion(object):
                         xs.append(xt_next.to('cpu'))
 
                 x = xs[-1]
-                
+
             x = [inverse_data_transform(config, xi) for xi in x]
 
             tvu.save_image(
@@ -435,8 +458,6 @@ class Diffusion(object):
         avg_psnr = avg_psnr / (idx_so_far - idx_init)
         print("Total Average PSNR: %.2f" % avg_psnr)
         print("Number of samples: %d" % (idx_so_far - idx_init))
-        
-        
 
     def svd_based_ddnm_plus(self, model, cls_fn):
         args, config = self.args, self.config
@@ -474,7 +495,7 @@ class Diffusion(object):
         deg = args.deg
         A_funcs = None
         if deg == 'cs_walshhadamard':
-            compress_by = round(1/args.deg_scale)
+            compress_by = round(1 / args.deg_scale)
             from functions.svd_operators import WalshHadamardCS
             A_funcs = WalshHadamardCS(config.data.channels, self.config.data.image_size, compress_by,
                                       torch.randperm(self.config.data.image_size ** 2, device=self.device), self.device)
@@ -511,6 +532,7 @@ class Diffusion(object):
                     return a * abs(x) ** 3 - 5 * a * abs(x) ** 2 + 8 * a * abs(x) - 4 * a
                 else:
                     return 0
+
             k = np.zeros((factor * 4))
             for i in range(factor * 4):
                 x = (1 / factor) * (i - np.floor(factor * 4 / 2) + 0.5)
@@ -543,9 +565,9 @@ class Diffusion(object):
                                    self.config.data.image_size, self.device)
         else:
             raise ValueError("degradation type not supported")
-        args.sigma_y = 2 * args.sigma_y #to account for scaling to [-1,1]
+        args.sigma_y = 2 * args.sigma_y  # to account for scaling to [-1,1]
         sigma_y = args.sigma_y
-        
+
         print(f'Start from {args.subset_start}')
         idx_init = args.subset_start
         idx_so_far = args.subset_start
@@ -556,7 +578,7 @@ class Diffusion(object):
             x_orig = data_transform(self.config, x_orig)
 
             y = A_funcs.A(x_orig)
-            
+
             b, hwc = y.size()
             if 'color' in deg:
                 hw = hwc / 1
@@ -568,20 +590,20 @@ class Diffusion(object):
                 hw = hwc / 3
                 h = w = int(hw ** 0.5)
                 y = y.reshape((b, 3, h, w))
-                
-            if self.args.add_noise: # for denoising test
-                y = get_gaussian_noisy_img(y, sigma_y) 
-            
+
+            if self.args.add_noise:  # for denoising test
+                y = get_gaussian_noisy_img(y, sigma_y)
+
             y = y.reshape((b, hwc))
 
             Apy = A_funcs.A_pinv(y).view(y.shape[0], config.data.channels, self.config.data.image_size,
-                                                self.config.data.image_size)
+                                         self.config.data.image_size)
 
             if deg[:6] == 'deblur':
                 Apy = y.view(y.shape[0], config.data.channels, self.config.data.image_size,
-                                    self.config.data.image_size)
+                             self.config.data.image_size)
             elif deg == 'colorization':
-                Apy = y.view(y.shape[0], 1, self.config.data.image_size, self.config.data.image_size).repeat(1,3,1,1)
+                Apy = y.view(y.shape[0], 1, self.config.data.image_size, self.config.data.image_size).repeat(1, 3, 1, 1)
             elif deg == 'inpainting':
                 Apy += A_funcs.A_pinv(A_funcs.A(torch.ones_like(Apy))).reshape(*Apy.shape) - 1
 
@@ -596,7 +618,7 @@ class Diffusion(object):
                     os.path.join(self.args.image_folder, f"Apy/orig_{idx_so_far + i}.png")
                 )
 
-            #Start DDIM
+            # Start DDIM
             x = torch.randn(
                 y.shape[0],
                 config.data.channels,
@@ -606,13 +628,14 @@ class Diffusion(object):
             )
 
             with torch.no_grad():
-                if sigma_y==0.: # noise-free case, turn to ddnm
-                    x, _ = ddnm_diffusion(x, model, self.betas, self.args.eta, A_funcs, y, cls_fn=cls_fn, classes=classes, config=config)
-                else: # noisy case, turn to ddnm+
-                    x, _ = ddnm_plus_diffusion(x, model, self.betas, self.args.eta, A_funcs, y, sigma_y, cls_fn=cls_fn, classes=classes, config=config)
+                if sigma_y == 0.:  # noise-free case, turn to ddnm
+                    x, _ = ddnm_diffusion(x, model, self.betas, self.args.eta, A_funcs, y, cls_fn=cls_fn,
+                                          classes=classes, config=config)
+                else:  # noisy case, turn to ddnm+
+                    x, _ = ddnm_plus_diffusion(x, model, self.betas, self.args.eta, A_funcs, y, sigma_y, cls_fn=cls_fn,
+                                               classes=classes, config=config)
 
             x = [inverse_data_transform(config, xi) for xi in x]
-
 
             for j in range(x[0].size(0)):
                 tvu.save_image(
@@ -631,7 +654,8 @@ class Diffusion(object):
         print("Total Average PSNR: %.2f" % avg_psnr)
         print("Number of samples: %d" % (idx_so_far - idx_init))
 
-# Code form RePaint   
+
+# Code form RePaint
 def get_schedule_jump(T_sampling, travel_length, travel_repeat):
     jumps = {}
     for j in range(0, T_sampling - travel_length, travel_length):
@@ -641,7 +665,7 @@ def get_schedule_jump(T_sampling, travel_length, travel_repeat):
     ts = []
 
     while t >= 1:
-        t = t-1
+        t = t - 1
         ts.append(t)
 
         if jumps.get(t, 0) > 0:
@@ -654,6 +678,7 @@ def get_schedule_jump(T_sampling, travel_length, travel_repeat):
 
     _check_times(ts, -1, T_sampling)
     return ts
+
 
 def _check_times(times, t_0, T_sampling):
     # Check end
@@ -670,7 +695,8 @@ def _check_times(times, t_0, T_sampling):
     for t in times:
         assert t >= t_0, (t, t_0)
         assert t <= T_sampling, (t, T_sampling)
-        
+
+
 def compute_alpha(beta, t):
     beta = torch.cat([torch.zeros(1).to(beta.device), beta], dim=0)
     a = (1 - beta).cumprod(dim=0).index_select(0, t + 1).view(-1, 1, 1, 1)

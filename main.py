@@ -143,6 +143,7 @@ def parse_args_and_config():
         torch.cuda.manual_seed_all(args.seed)
 
     torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.enabled = False
 
     return args, new_config
 
