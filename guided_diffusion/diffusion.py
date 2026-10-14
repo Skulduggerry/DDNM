@@ -81,15 +81,15 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
     return betas
 
 
-def shifted_repeat(vec, repeat_cnt=4, shift=1):
+def shifted_repeat(x, repeat_cnt=4, shift=1):
     # =========================
     # FELIX'S CODE
     # =========================
-    b, c, h, w = vec.shape
+    b, c, h, w = x.shape
     size = w - (repeat_cnt - 1) * shift
-    patches = vec.unfold(2, size, shift).unfold(3, size, shift)
+    patches = x.unfold(2, size, shift).unfold(3, size, shift)
     patches = patches.permute(0, 1, 2, 4, 3, 5)
-    out = patches.reshape(1, 3, size * repeat_cnt, size * repeat_cnt)
+    out = patches.reshape(b, c, size * repeat_cnt, size * repeat_cnt)
     return out
 
 def apply_A(x, repeat_cnt=4, shift=10):
@@ -108,8 +108,46 @@ def apply_Ap_cg(y):
     def fn(x):
         diff = (apply_A(x) - y) ** 2
         return diff.sum()
-    x0 = torch.zeros((1, 3, 256, 256), device=y.device, requires_grad=True)
+    x0 = torch.zeros((1, 3, 256, 256), device=y.device)
     return torchmin.minimize(fn, x0, method='cg').x
+
+def apply_A_1D(x, repeat_cnt=4, shift=10, kernel_size=5, sigma=3):
+    # =========================
+    # FELIX'S CODE
+    # =========================
+    # reshape
+    b, c, w = x.shape
+    size = w - (repeat_cnt - 1) * shift
+    patches = x.unfold(2, size, shift)
+    x = patches.reshape(b, c, size * repeat_cnt)
+
+    # blur
+    ksize_half = (kernel_size - 1) * 0.5
+    kernel = torch.linspace(-ksize_half, ksize_half, steps=kernel_size, device=x.device)
+    kernel = torch.exp(-0.5 * (kernel / sigma).pow(2))
+    kernel /= kernel.sum()
+    kernel = kernel.view(1, 1, 5)
+    x = torch.nn.functional.pad(x, (2, 2), mode='reflect')
+    x = torch.nn.functional.conv1d(x, kernel)
+
+    # downsample
+    x = torch.nn.functional.adaptive_avg_pool1d(x, 256)
+
+    return x
+
+# =========================
+# FELIX'S CODE
+# =========================
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+I = torch.eye(256, device=device).view(256, 1, 256)
+M = apply_A_1D(I).squeeze(1).t()
+Mp = torch.linalg.pinv(M)
+
+def apply_Ap_seperable(y):
+    # =========================
+    # FELIX'S CODE
+    # =========================
+    return Mp @ y @ Mp.t()
 
 class Diffusion(object):
     def __init__(self, args, config, device=None):
@@ -306,30 +344,12 @@ class Diffusion(object):
             
             A = lambda z: A3(A2(A1(z)))
             Ap = lambda z: A1p(A2p(A3p(z)))
-        elif args.deg =='diy':
-            # =========================
-            # FELIX'S CODE
-            # =========================
-
-            # repeat image
-            # repeat_cnt = 4
-            # shift = 10
-            # A1 = lambda z: shifted_repeat(z, repeat_cnt, shift)
-            # A1p = lambda z: z[:, :, :256, :256]
-
-            # TODO pseudoinverse of gaussian blur -> maybe not needed
-            # import torchvision
-            # A2 = lambda z: torchvision.transforms.GaussianBlur([5, 5], sigma=3).forward(z)
-            # A2p = lambda z: z
-
-            # downscale image back to 256*256
-            # A3 = torch.nn.AdaptiveAvgPool2d((256, 256))
-            # A3p = lambda z: MeanUpsample(z, repeat_cnt)
-
-            # TODO add noise
-
+        elif args.deg =='diy_cg':
             A = lambda x: apply_A(x)
             Ap = lambda y: apply_Ap_cg(y)
+        elif args.deg =='diy_separable':
+            A = lambda x: apply_A(x)
+            Ap = lambda y: apply_Ap_seperable(y)
         else:
             raise NotImplementedError("degradation type not supported")
 
