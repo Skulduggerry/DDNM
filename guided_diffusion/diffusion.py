@@ -137,12 +137,12 @@ def apply_Ap_cg(y, config):
     # =========================
     in_size = config.ddnm.input_size
     b, c, _, _ = y.shape
-    rtol = config.ddnm.cg_rtol
-    max_iter = config.ddnm.max_iter
+    rtol = float(config.ddnm.cg_rtol)
+    max_iter = config.ddnm.cg_max_iter
 
     with torch.no_grad():
         x0 = torch.zeros((b, c, in_size, in_size), device=y.device, dtype=y.dtype)
-        _, vjp_fn = torch.func.vjp(apply_A, x0)
+        _, vjp_fn = torch.func.vjp(lambda x: apply_A(x, config), x0)
         At_fn = lambda v: vjp_fn(v)[0]
         AtA_fn = lambda x: At_fn(apply_A(x, config))
 
@@ -417,12 +417,19 @@ class Diffusion(object):
         idx_so_far = args.subset_start
         avg_psnr = 0.0
         pbar = tqdm.tqdm(val_loader)
+
         for x_orig, classes in pbar:
             # make x_orig a 64 bit float for higher to validate
             x_orig = x_orig.to(self.device, dtype=torch.float64)
             x_orig = data_transform(self.config, x_orig)
 
             y = A(x_orig)
+
+            if getattr(self.args, 'add_noise', False):
+                y = get_gaussian_noisy_img(y, sigma_y)
+
+            if self.args.add_noise:  # for denoising test
+                y = get_gaussian_noisy_img(y, 0)
 
             if config.sampling.batch_size != 1:
                 raise ValueError("please change the config file to set batch size as 1")
@@ -434,7 +441,7 @@ class Diffusion(object):
             error = torch.norm(ApAApy - Apy) / torch.norm(Apy)
             print("Error between Ap(y) and Ap(A(Ap(y))): %.16f" % error)
             # assert (error < 1e-10)
-
+            
             # make y a float32 to match the network
             y = y.to(dtype=torch.float32)
 
