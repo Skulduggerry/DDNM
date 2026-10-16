@@ -1,27 +1,19 @@
 import os
-import logging
-import time
-import glob
+import random
 
 import numpy as np
-import torchmin
-import torchvision
-import tqdm
 import torch
 import torch.utils.data as data
-from sympy.tensor import tensor
+import torchmin
+import torchvision
+import torchvision.utils as tvu
+import tqdm
 
 from datasets import get_dataset, data_transform, inverse_data_transform
 from functions.ckpt_util import get_ckpt_path, download
 from functions.svd_ddnm import ddnm_diffusion, ddnm_plus_diffusion
-
-import torchvision.utils as tvu
-
 from guided_diffusion.models import Model
 from guided_diffusion.script_util import create_model, create_classifier, classifier_defaults, args_to_dict
-import random
-
-from scipy.linalg import orth
 
 
 def get_gaussian_noisy_img(img, noise_level):
@@ -92,26 +84,61 @@ def shifted_repeat(x, repeat_cnt=4, shift=1):
     out = patches.reshape(b, c, size * repeat_cnt, size * repeat_cnt)
     return out
 
-def apply_A(x, repeat_cnt=4, shift=10):
+
+def apply_A(x, repeat_cnt=4, shift=10, kernel_size=17, sigma=5):
     # =========================
     # FELIX'S CODE
     # =========================
     shifted = shifted_repeat(x, repeat_cnt, shift)
-    blurred = torchvision.transforms.GaussianBlur([5, 5], sigma=3).forward(shifted)
+    blurred = torchvision.transforms.GaussianBlur([kernel_size, kernel_size], sigma=sigma).forward(shifted)
     downsampled = torch.nn.AdaptiveAvgPool2d((256, 256)).forward(blurred)
-    return downsampled
+    return downsampled.to(dtype=x.dtype)
+
+
+def cg(A_op, b, rtol=1e-10, max_iter=200):
+    x = torch.zeros_like(b)
+    r = b.clone()
+    p = r.clone()
+    rsold = torch.sum(r * r)
+    bnorm = torch.norm(b)
+
+    if bnorm < 1e-12:
+        return x
+
+    for i in range(max_iter):
+        Ap = A_op(p)
+        alpha = rsold / torch.sum(p * Ap)
+        x = x + alpha * p
+        r = r - alpha * Ap
+
+        if torch.norm(r) / bnorm < rtol:
+            # print(f"CG converged after {i + 1} iterations")
+            break
+
+        rsnew = torch.sum(r * r)
+        p = r + (rsnew / rsold) * p
+        rsold = rsnew
+    else:
+        pass
+        # print("CG reached max_iter without hitting rtol")
+
+    return x
+
 
 def apply_Ap_cg(y):
     # =========================
     # FELIX'S CODE
     # =========================
-    def fn(x):
-        diff = (apply_A(x) - y) ** 2
-        return diff.sum()
-    x0 = torch.zeros((1, 3, 256, 256), device=y.device)
-    return torchmin.minimize(fn, x0, method='cg').x
+    with torch.no_grad():
+        x0 = torch.zeros((1, 3, 256, 256), device=y.device, dtype=y.dtype)
+        _, vjp_fn = torch.func.vjp(apply_A, x0)
+        At_fn = lambda v: vjp_fn(v)[0]
+        AtA_fn = lambda x: At_fn(apply_A(x))
 
-def apply_A_1D(x, repeat_cnt=4, shift=10, kernel_size=5, sigma=3):
+        At_y = At_fn(y)
+        return cg(AtA_fn, At_y, rtol=1e-10, max_iter=200)
+
+def apply_A_1D(x, repeat_cnt=4, shift=10, kernel_size=17, sigma=5):
     # =========================
     # FELIX'S CODE
     # =========================
@@ -122,12 +149,12 @@ def apply_A_1D(x, repeat_cnt=4, shift=10, kernel_size=5, sigma=3):
     x = patches.reshape(b, c, size * repeat_cnt)
 
     # blur
-    ksize_half = (kernel_size - 1) * 0.5
-    kernel = torch.linspace(-ksize_half, ksize_half, steps=kernel_size, device=x.device)
+    ksize_half = (kernel_size - 1) // 2
+    kernel = torch.linspace(-ksize_half, ksize_half, steps=kernel_size, device=x.device, dtype=x.dtype)
     kernel = torch.exp(-0.5 * (kernel / sigma).pow(2))
     kernel /= kernel.sum()
-    kernel = kernel.view(1, 1, 5)
-    x = torch.nn.functional.pad(x, (2, 2), mode='reflect')
+    kernel = kernel.view(1, 1, kernel_size)
+    x = torch.nn.functional.pad(x, (ksize_half, ksize_half), mode='reflect')
     x = torch.nn.functional.conv1d(x, kernel)
 
     # downsample
@@ -135,19 +162,30 @@ def apply_A_1D(x, repeat_cnt=4, shift=10, kernel_size=5, sigma=3):
 
     return x
 
-# =========================
-# FELIX'S CODE
-# =========================
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-I = torch.eye(256, device=device).view(256, 1, 256)
-M = apply_A_1D(I).squeeze(1).t()
-Mp = torch.linalg.pinv(M)
 
-def apply_Ap_seperable(y):
+def get_Mp(dtype):
     # =========================
     # FELIX'S CODE
     # =========================
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    I = torch.eye(256, device=device, dtype=dtype).view(256, 1, 256)
+    M = apply_A_1D(I).squeeze(1).t()
+    return torch.linalg.pinv(M)
+
+
+Mp = None
+
+
+def apply_Ap_seperable(y: torch.Tensor):
+    # =========================
+    # FELIX'S CODE
+    # =========================
+    global Mp
+    if Mp is None or Mp.dtype is not y.dtype:
+        Mp = get_Mp(y.dtype)
+
     return Mp @ y @ Mp.t()
+
 
 class Diffusion(object):
     def __init__(self, args, config, device=None):
@@ -337,17 +375,17 @@ class Diffusion(object):
 
             A2 = lambda z: color2gray(z)
             A2p = lambda z: gray2color(z)
-            
-            scale=round(args.deg_scale)
-            A3 = torch.nn.AdaptiveAvgPool2d((256//scale,256//scale))
-            A3p = lambda z: MeanUpsample(z,scale)
-            
+
+            scale = round(args.deg_scale)
+            A3 = torch.nn.AdaptiveAvgPool2d((256 // scale, 256 // scale))
+            A3p = lambda z: MeanUpsample(z, scale)
+
             A = lambda z: A3(A2(A1(z)))
             Ap = lambda z: A1p(A2p(A3p(z)))
-        elif args.deg =='diy_cg':
+        elif args.deg == 'diy_cg':
             A = lambda x: apply_A(x)
             Ap = lambda y: apply_Ap_cg(y)
-        elif args.deg =='diy_separable':
+        elif args.deg == 'diy_separable':
             A = lambda x: apply_A(x)
             Ap = lambda y: apply_Ap_seperable(y)
         else:
@@ -362,7 +400,8 @@ class Diffusion(object):
         avg_psnr = 0.0
         pbar = tqdm.tqdm(val_loader)
         for x_orig, classes in pbar:
-            x_orig = x_orig.to(self.device)
+            # make x_orig a 64 bit float for higher to validate
+            x_orig = x_orig.to(self.device, dtype=torch.float64)
             x_orig = data_transform(self.config, x_orig)
 
             y = A(x_orig)
@@ -372,19 +411,28 @@ class Diffusion(object):
 
             Apy = Ap(y)
 
-            os.makedirs(os.path.join(self.args.image_folder, "Apy"), exist_ok=True)
+            # validate the pseudo inverse with high precision
+            ApAApy = Ap(A(Apy))
+            error = torch.norm(ApAApy - Apy) / torch.norm(Apy)
+            print("Error between Ap(y) and Ap(A(Ap(y))): %.16f" % error)
+            # assert (error < 1e-10)
+
+            # make y a float32 to match the network
+            y = y.to(dtype=torch.float32)
+
+            os.makedirs(os.path.join(self.args.image_folder, f"{idx_so_far}"), exist_ok=True)
             for i in range(len(Apy)):
                 tvu.save_image(
                     inverse_data_transform(config, y[i]),
-                    os.path.join(self.args.image_folder, f"Apy/{idx_so_far + i}_y.png")
+                    os.path.join(self.args.image_folder, f"{idx_so_far}/y.png")
                 )
                 tvu.save_image(
                     inverse_data_transform(config, Apy[i]),
-                    os.path.join(self.args.image_folder, f"Apy/{idx_so_far + i}_Apy.png")
+                    os.path.join(self.args.image_folder, f"{idx_so_far}/Apy.png")
                 )
                 tvu.save_image(
                     inverse_data_transform(config, x_orig[i]),
-                    os.path.join(self.args.image_folder, f"Apy/{idx_so_far + i}_orig.png")
+                    os.path.join(self.args.image_folder, f"{idx_so_far}/orig.png")
                 )
 
             # init x_T
@@ -464,15 +512,29 @@ class Diffusion(object):
             x = [inverse_data_transform(config, xi) for xi in x]
 
             tvu.save_image(
-                x[0], os.path.join(self.args.image_folder, f"{idx_so_far + j}_{0}.png")
+                x[0], os.path.join(self.args.image_folder, f"{idx_so_far}/ddnm.png")
             )
+
             orig = inverse_data_transform(config, x_orig[0])
-            mse = torch.mean((x[0].to(self.device) - orig) ** 2)
+            diff = x[0].to(self.device) - orig
+
+            mse = torch.mean(diff ** 2)
             psnr = 10 * torch.log10(1 / mse)
             avg_psnr += psnr
 
+            norm_error = torch.norm(diff) / torch.norm(orig)
+            norm_error_orig_Ap_A_y = torch.norm(inverse_data_transform(config, Apy[0]) - orig) / torch.norm(orig)
+
+            with open(os.path.join(self.args.image_folder, f"{idx_so_far}/errors.txt"), mode='w') as f:
+                f.write(f"""
+                    MSE={mse}
+                    PSNR={psnr}
+                    Norm Error={norm_error}
+                    Norm Error Original and Ap(A(orig))={norm_error_orig_Ap_A_y}
+                """)
             idx_so_far += y.shape[0]
 
+            print("MSE: %f" % mse)
             pbar.set_description("PSNR: %.2f" % (avg_psnr / (idx_so_far - idx_init)))
 
         avg_psnr = avg_psnr / (idx_so_far - idx_init)
