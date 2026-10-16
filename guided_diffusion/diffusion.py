@@ -73,7 +73,7 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
     return betas
 
 
-def shifted_repeat(x, repeat_cnt=4, shift=1):
+def shifted_repeat(x, repeat_cnt, shift):
     # =========================
     # FELIX'S CODE
     # =========================
@@ -85,14 +85,20 @@ def shifted_repeat(x, repeat_cnt=4, shift=1):
     return out
 
 
-def apply_A(x, repeat_cnt=4, shift=10, kernel_size=17, sigma=5):
+def apply_A(x, config):
     # =========================
     # FELIX'S CODE
     # =========================
+    repeat_cnt = config.ddnm.repeat_cnt
+    shift = config.ddnm.shift
+    blur_ksize = config.ddnm.blur_kernel_size
+    blur_strength = config.ddnm.blur_strength
+    outsize = config.ddnm.output_size
+
     shifted = shifted_repeat(x, repeat_cnt, shift)
-    blurred = torchvision.transforms.GaussianBlur([kernel_size, kernel_size], sigma=sigma).forward(shifted)
-    downsampled = torch.nn.AdaptiveAvgPool2d((256, 256)).forward(blurred)
-    return downsampled.to(dtype=x.dtype)
+    blurred = torchvision.transforms.GaussianBlur([blur_ksize, blur_ksize], blur_strength).forward(shifted)
+    downsampled = torch.nn.AdaptiveAvgPool2d((outsize, outsize)).forward(blurred)
+    return downsampled
 
 
 def cg(A_op, b, rtol=1e-10, max_iter=200):
@@ -125,25 +131,36 @@ def cg(A_op, b, rtol=1e-10, max_iter=200):
     return x
 
 
-def apply_Ap_cg(y):
+def apply_Ap_cg(y, config):
     # =========================
     # FELIX'S CODE
     # =========================
+    in_size = config.ddnm.input_size
+    b, c, _, _ = y.shape
+    rtol = config.ddnm.cg_rtol
+    max_iter = config.ddnm.max_iter
+
     with torch.no_grad():
-        x0 = torch.zeros((1, 3, 256, 256), device=y.device, dtype=y.dtype)
+        x0 = torch.zeros((b, c, in_size, in_size), device=y.device, dtype=y.dtype)
         _, vjp_fn = torch.func.vjp(apply_A, x0)
         At_fn = lambda v: vjp_fn(v)[0]
-        AtA_fn = lambda x: At_fn(apply_A(x))
+        AtA_fn = lambda x: At_fn(apply_A(x, config))
 
         At_y = At_fn(y)
-        return cg(AtA_fn, At_y, rtol=1e-10, max_iter=200)
+        return cg(AtA_fn, At_y, rtol=rtol, max_iter=max_iter)
 
-def apply_A_1D(x, repeat_cnt=4, shift=10, kernel_size=17, sigma=5):
+def apply_A_1D(x, config):
     # =========================
     # FELIX'S CODE
     # =========================
     # reshape
     b, c, w = x.shape
+    repeat_cnt = config.ddnm.repeat_cnt
+    shift = config.ddnm.shift
+    kernel_size = config.ddnm.blur_kernel_size
+    sigma = config.ddnm.blur_strength
+    outsize = config.ddnm.output_size
+
     size = w - (repeat_cnt - 1) * shift
     patches = x.unfold(2, size, shift)
     x = patches.reshape(b, c, size * repeat_cnt)
@@ -158,31 +175,32 @@ def apply_A_1D(x, repeat_cnt=4, shift=10, kernel_size=17, sigma=5):
     x = torch.nn.functional.conv1d(x, kernel)
 
     # downsample
-    x = torch.nn.functional.adaptive_avg_pool1d(x, 256)
+    x = torch.nn.functional.adaptive_avg_pool1d(x, outsize)
 
     return x
 
 
-def get_Mp(dtype):
+def get_Mp(dtype, config):
     # =========================
     # FELIX'S CODE
     # =========================
+    in_size = config.ddnm.input_size
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    I = torch.eye(256, device=device, dtype=dtype).view(256, 1, 256)
-    M = apply_A_1D(I).squeeze(1).t()
+    I = torch.eye(in_size, device=device, dtype=dtype).view(in_size, 1, in_size)
+    M = apply_A_1D(I, config).squeeze(1).t()
     return torch.linalg.pinv(M)
 
 
 Mp = None
 
 
-def apply_Ap_seperable(y: torch.Tensor):
+def apply_Ap_seperable(y: torch.Tensor, config):
     # =========================
     # FELIX'S CODE
     # =========================
     global Mp
     if Mp is None or Mp.dtype is not y.dtype:
-        Mp = get_Mp(y.dtype)
+        Mp = get_Mp(y.dtype, config)
 
     return Mp @ y @ Mp.t()
 
@@ -383,11 +401,11 @@ class Diffusion(object):
             A = lambda z: A3(A2(A1(z)))
             Ap = lambda z: A1p(A2p(A3p(z)))
         elif args.deg == 'diy_cg':
-            A = lambda x: apply_A(x)
-            Ap = lambda y: apply_Ap_cg(y)
+            A = lambda x: apply_A(x, config)
+            Ap = lambda y: apply_Ap_cg(y, config)
         elif args.deg == 'diy_separable':
-            A = lambda x: apply_A(x)
-            Ap = lambda y: apply_Ap_seperable(y)
+            A = lambda x: apply_A(x, config)
+            Ap = lambda y: apply_Ap_seperable(y, config)
         else:
             raise NotImplementedError("degradation type not supported")
 

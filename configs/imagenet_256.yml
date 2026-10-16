@@ -1,3 +1,19 @@
+ddnm:
+    blur_kernel_size: 13
+    blur_strength: 5
+
+    repeat_cnt: 4
+    shift: 5
+
+    gaussian_noise: True
+    noise_stength: 1
+
+    output_size: 256
+    input_size: 256
+
+    cg_max_iter: 200
+    cg_rtol: 1e-10
+
 data:
     dataset: "ImageNet"
     image_size: 256
