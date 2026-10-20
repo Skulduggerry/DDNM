@@ -4,7 +4,6 @@ import random
 import numpy as np
 import torch
 import torch.utils.data as data
-import torchmin
 import torchvision
 import torchvision.utils as tvu
 import tqdm
@@ -136,7 +135,7 @@ def apply_Ap_cg(y, config):
     # FELIX'S CODE
     # =========================
     in_size = config.ddnm.input_size
-    b, c, _, _ = y.shape
+    b, c, h, w = y.shape
     rtol = float(config.ddnm.cg_rtol)
     max_iter = config.ddnm.cg_max_iter
 
@@ -184,7 +183,7 @@ def get_Mp(dtype, config):
     # =========================
     # FELIX'S CODE
     # =========================
-    in_size = config.ddnm.input_size
+    in_size = config.data.image_size
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     I = torch.eye(in_size, device=device, dtype=dtype).view(in_size, 1, in_size)
     M = apply_A_1D(I, config).squeeze(1).t()
@@ -420,16 +419,13 @@ class Diffusion(object):
 
         for x_orig, classes in pbar:
             # make x_orig a 64 bit float for higher to validate
-            x_orig = x_orig.to(self.device, dtype=torch.float64)
+            x_orig = x_orig.to(self.device) #x_orig.to(self.device, dtype=torch.float64)
             x_orig = data_transform(self.config, x_orig)
 
             y = A(x_orig)
 
-            if getattr(self.args, 'add_noise', False):
-                y = get_gaussian_noisy_img(y, sigma_y)
-
             if self.args.add_noise:  # for denoising test
-                y = get_gaussian_noisy_img(y, 0)
+                y = get_gaussian_noisy_img(y, sigma_y)
 
             if config.sampling.batch_size != 1:
                 raise ValueError("please change the config file to set batch size as 1")
@@ -444,6 +440,22 @@ class Diffusion(object):
             
             # make y a float32 to match the network
             y = y.to(dtype=torch.float32)
+
+            print("#### Original Image ####")
+            print("shape:", x_orig.shape)
+            print("isfinite:", x_orig[0].isfinite().all().item())
+            print("max:", x_orig[0].max())
+            print("min:", x_orig[0].min())
+            print("nan:", x_orig[0].isnan().all().item())
+            print("#############")
+
+            print("#### Image A(x_orig) ####")
+            print("shape:", y.shape)
+            print("isfinite:", y[0].isfinite().all().item())
+            print("max:", y[0].max())
+            print("min:", y[0].min())
+            print("nan:", y[0].isnan().all().item())
+            print("#############")
 
             os.makedirs(os.path.join(self.args.image_folder, f"{idx_so_far}"), exist_ok=True)
             for i in range(len(Apy)):
@@ -533,6 +545,13 @@ class Diffusion(object):
                         xs.append(xt_next.to('cpu'))
 
                 x = xs[-1]
+
+            print("#### Final Output ####")
+            print("isfinite:", x[0].isfinite().all().item())
+            print("max:", x[0].max())
+            print("min:", x[0].min())
+            print("nan:", x[0].isnan().all().item())
+            print("##############")
 
             x = [inverse_data_transform(config, xi) for xi in x]
 
@@ -670,6 +689,9 @@ class Diffusion(object):
                 self.device)
             A_funcs = Deblurring2D(kernel1 / kernel1.sum(), kernel2 / kernel2.sum(), config.data.channels,
                                    self.config.data.image_size, self.device)
+        elif deg  == 'tombo':
+            from functions.svd_operators import TomboSVD
+            A_funcs = TomboSVD(config.data.channels, config.data.image_size, config.ddnm.output_size, config.ddnm.repeat_cnt, config.ddnm.shift, config.ddnm.blur_kernel_size, config.ddnm.blur_strength, self.device)
         else:
             raise ValueError("degradation type not supported")
         args.sigma_y = 2 * args.sigma_y  # to account for scaling to [-1,1]
