@@ -572,7 +572,7 @@ class SuperResolution(A_functions):
         if a != 0 and sigma_y != 0:
             change_index = (sigma_t < a * sigma_y * inverse_singulars) * 1.0
             lambda_t = lambda_t * (-change_index + 1.0) + change_index * (
-                        singulars * sigma_t * (1 - eta ** 2) ** 0.5 / a / sigma_y)
+                    singulars * sigma_t * (1 - eta ** 2) ** 0.5 / a / sigma_y)
 
         lambda_t = lambda_t.reshape(1, 1, 1, -1)
         #         print("lambda_t:", lambda_t)
@@ -1200,25 +1200,54 @@ class TomboSVD(A_functions):
                                                                                         M.shape[1])
 
     def Vt(self, vec):
-        pass
+        X = vec.reshape(-1, self.channels, self.in_size, self.in_size)
+        Y = self.mat_by_img(self.Vt_small, X, self.in_size)
+        Y = self.img_by_mat(Y, self.V_small, self.in_size)
+        Y = Y.reshape(-1, self.channels, self.in_size ** 2)
+        Y = Y[:, :, self._perm].permute(0, 2, 1).reshape(vec.shape[0], -1)
+        return Y
 
     def V(self, vec):
-        pass
+        Y = vec.reshape(-1, self.in_size ** 2, self.channels).permute(0, 2, 1)
+        temp = torch.zeros_like(Y)
+        temp[:, :, self._perm] = Y
+        Y = temp.reshape(-1, self.channels, self.in_size, self.in_size)
+        X = self.mat_by_img(self.V_small, Y, self.in_size)
+        X = self.img_by_mat(X, self.Vt_small, self.in_size)
+        return X.reshape(X.shape[0], -1)
 
     def Ut(self, vec):
-        pass
+        Y = vec.reshape(-1, self.out_size ** 2, self.channels).permute(0, 2, 1)
+        Y = Y.reshape(-1, self.channels, self.out_size, self.out_size)
+        X = self.mat_by_img(self.Ut_small, Y, self.out_size)
+        X = self.img_by_mat(X, self.U_small, self.out_size)
+        return X.reshape(-1, self.channels, self.out_size ** 2).permute(0, 2, 1).reshape(vec.shape[0], -1)
 
     def U(self, vec):
-        pass
+        Y = vec.reshape(-1, self.out_size ** 2, self.channels).permute(0, 2, 1)
+        Y = Y.reshape(-1, self.channels, self.out_size, self.out_size)
+        X = self.mat_by_img(self.U_small, Y, self.out_size)
+        X = self.img_by_mat(X, self.Ut_small, self.out_size)
+        return X.reshape(-1, self.channels, self.out_size ** 2).permute(0, 2, 1).reshape(vec.shape[0], -1)
 
     def singulars(self):
-        pass
+        return self._singulars.repeat_interleave(self.channels).reshape(-1)
 
     def add_zeros(self, vec):
-        pass
+        out = torch.zeros(vec.shape[0], self.channels * self.in_size ** 2, device=vec.device)
+        out[:, :vec.shape[1]] = vec
+        return out
 
     def A_pinv(self, vec):
-        pass
+        temp = self.Ut(vec)
+        singulars = self.singulars().unsqueeze(0)
+
+        mu = 4e-4
+        inverse_singulars = singulars / (singulars ** 2 + mu)
+        temp = temp * inverse_singulars
+
+        temp = self.add_zeros(temp)
+        return self.V(temp)
 
     def Lambda(self, vec, a, sigma_y, sigma_t, eta):
         pass
