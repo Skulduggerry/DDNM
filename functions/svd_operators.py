@@ -1154,10 +1154,11 @@ def apply_A_1D(x, repeat_cnt, shift, ksize, blur_strength, out_size):
 
 # noinspection pep8-naming
 class TomboSVD(A_functions):
-    def __init__(self, channels, input_size, output_size, repeat_cnt, shift, blur_size, blur_strength, device):
+    def __init__(self, channels, input_size, output_size, repeat_cnt, shift, blur_size, blur_strength, device, mu = 4e-4):
         self.channels = channels
         self.in_size = input_size
         self.out_size = output_size
+        self.mu = mu
 
         # 1D matrix degradation
         I_mat = torch.eye(self.in_size, device=device).view(self.in_size, 1, self.in_size)
@@ -1242,15 +1243,66 @@ class TomboSVD(A_functions):
         temp = self.Ut(vec)
         singulars = self.singulars().unsqueeze(0)
 
-        mu = 4e-4
-        inverse_singulars = singulars / (singulars ** 2 + mu)
+        # inverse_singulars = 1. / singulars
+        # inverse_singulars[singulars < self.mu] = 0.
+        inverse_singulars = singulars / (singulars ** 2 + self.mu)
         temp = temp * inverse_singulars
 
         temp = self.add_zeros(temp)
         return self.V(temp)
 
     def Lambda(self, vec, a, sigma_y, sigma_t, eta):
-        pass
+        temp_vec = self.Vt(vec).reshape(vec.shape[0], self.in_size ** 2, self.channels)
+
+        lambda_t = torch.ones(self.in_size ** 2, device=vec.device)
+
+        singulars = self._singulars_full
+        # inverse_singulars = 1. / singulars
+        # inverse_singulars[singulars < self.mu] = 0.
+        inverse_singulars = singulars / (singulars ** 2 + self.mu)
+
+        if a != 0 and sigma_y != 0:
+            change_index = (sigma_t < a * sigma_y * inverse_singulars) * 1.0
+            lambda_t = lambda_t * (-change_index + 1.0) + change_index * (
+                    singulars * sigma_t * (1 - eta ** 2) ** 0.5 / a / sigma_y)
+
+        lambda_t = lambda_t.reshape(1, -1, 1)
+        temp_vec = temp_vec * lambda_t
+
+        return self.V(temp_vec.reshape(vec.shape[0], -1))
 
     def Lambda_noise(self, vec, a, sigma_y, sigma_t, eta, epsilon):
-        pass
+        temp_vec = self.Vt(vec).reshape(vec.shape[0], self.in_size ** 2, self.channels)
+        temp_eps = self.Vt(epsilon).reshape(vec.shape[0], self.in_size ** 2, self.channels)
+
+        d1_t = torch.ones(self.in_size ** 2, device=vec.device) * sigma_t * eta
+        d2_t = torch.ones(self.in_size ** 2, device=vec.device) * sigma_t * (1 - eta ** 2) ** 0.5
+
+        singulars = self._singulars_full
+        inverse_singulars = singulars / (singulars ** 2 + self.mu)
+
+        if a != 0 and sigma_y != 0:
+            change_index = (sigma_t < a * sigma_y * inverse_singulars) * 1.0
+            d1_t = d1_t * (-change_index + 1.0) + change_index * sigma_t * eta
+            d2_t = d2_t * (-change_index + 1.0)
+
+            change_index = (sigma_t > a * sigma_y * inverse_singulars) * 1.0
+            d1_t = d1_t * (-change_index + 1.0) + torch.sqrt(
+                change_index * (sigma_t ** 2 - a ** 2 * sigma_y ** 2 * inverse_singulars ** 2))
+            d2_t = d2_t * (-change_index + 1.0)
+
+            change_index = (singulars < 1e-5) * 1.0
+            d1_t = d1_t * (-change_index + 1.0) + change_index * sigma_t * eta
+            d2_t = d2_t * (-change_index + 1.0) + change_index * sigma_t * (1 - eta ** 2) ** 0.5
+
+        d1_t = d1_t.reshape(1, -1, 1)
+        d2_t = d2_t.reshape(1, -1, 1)
+
+        temp_vec = temp_vec * d1_t
+        temp_eps = temp_eps * d2_t
+
+        out_vec = self.V(temp_vec.reshape(vec.shape[0], -1))
+        out_eps = self.V(temp_eps.reshape(vec.shape[0], -1))
+
+        return out_vec + out_eps
+

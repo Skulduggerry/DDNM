@@ -433,29 +433,13 @@ class Diffusion(object):
             Apy = Ap(y)
 
             # validate the pseudo inverse with high precision
-            ApAApy = Ap(A(Apy))
-            error = torch.norm(ApAApy - Apy) / torch.norm(Apy)
-            print("Error between Ap(y) and Ap(A(Ap(y))): %.16f" % error)
+            # ApAApy = Ap(A(Apy))
+            # error = torch.norm(ApAApy - Apy) / torch.norm(Apy)
+            # print("Error between Ap(y) and Ap(A(Ap(y))): %.16f" % error)
             # assert (error < 1e-10)
             
             # make y a float32 to match the network
-            y = y.to(dtype=torch.float32)
-
-            print("#### Original Image ####")
-            print("shape:", x_orig.shape)
-            print("isfinite:", x_orig[0].isfinite().all().item())
-            print("max:", x_orig[0].max())
-            print("min:", x_orig[0].min())
-            print("nan:", x_orig[0].isnan().all().item())
-            print("#############")
-
-            print("#### Image A(x_orig) ####")
-            print("shape:", y.shape)
-            print("isfinite:", y[0].isfinite().all().item())
-            print("max:", y[0].max())
-            print("min:", y[0].min())
-            print("nan:", y[0].isnan().all().item())
-            print("#############")
+            # y = y.to(dtype=torch.float32)
 
             os.makedirs(os.path.join(self.args.image_folder, f"{idx_so_far}"), exist_ok=True)
             for i in range(len(Apy)):
@@ -691,7 +675,15 @@ class Diffusion(object):
                                    self.config.data.image_size, self.device)
         elif deg  == 'tombo':
             from functions.svd_operators import TomboSVD
-            A_funcs = TomboSVD(config.data.channels, config.data.image_size, config.ddnm.output_size, config.ddnm.repeat_cnt, config.ddnm.shift, config.ddnm.blur_kernel_size, config.ddnm.blur_strength, self.device)
+            A_funcs = TomboSVD(config.data.channels,
+                               config.data.image_size,
+                               config.ddnm.output_size,
+                               config.ddnm.repeat_cnt,
+                               config.ddnm.shift,
+                               config.ddnm.blur_kernel_size,
+                               config.ddnm.blur_strength,
+                               self.device,
+                               mu=4e-5)
         else:
             raise ValueError("degradation type not supported")
         args.sigma_y = 2 * args.sigma_y  # to account for scaling to [-1,1]
@@ -736,15 +728,19 @@ class Diffusion(object):
             elif deg == 'inpainting':
                 Apy += A_funcs.A_pinv(A_funcs.A(torch.ones_like(Apy))).reshape(*Apy.shape) - 1
 
-            os.makedirs(os.path.join(self.args.image_folder, "Apy"), exist_ok=True)
+            os.makedirs(os.path.join(self.args.image_folder, f"{idx_so_far}"), exist_ok=True)
             for i in range(len(Apy)):
+                # tvu.save_image(
+                #     inverse_data_transform(config, y[i].reshape(self.config.data.channels, self.config.data.image_size, self.config.data.image_size)),
+                #     os.path.join(self.args.image_folder, f"{idx_so_far}/y.png")
+                # )
                 tvu.save_image(
                     inverse_data_transform(config, Apy[i]),
-                    os.path.join(self.args.image_folder, f"Apy/Apy_{idx_so_far + i}.png")
+                    os.path.join(self.args.image_folder, f"{idx_so_far}/Apy.png")
                 )
                 tvu.save_image(
                     inverse_data_transform(config, x_orig[i]),
-                    os.path.join(self.args.image_folder, f"Apy/orig_{idx_so_far + i}.png")
+                    os.path.join(self.args.image_folder, f"{idx_so_far}/orig.png")
                 )
 
             # Start DDIM
@@ -766,17 +762,30 @@ class Diffusion(object):
 
             x = [inverse_data_transform(config, xi) for xi in x]
 
-            for j in range(x[0].size(0)):
-                tvu.save_image(
-                    x[0][j], os.path.join(self.args.image_folder, f"{idx_so_far + j}_{0}.png")
-                )
-                orig = inverse_data_transform(config, x_orig[j])
-                mse = torch.mean((x[0][j].to(self.device) - orig) ** 2)
-                psnr = 10 * torch.log10(1 / mse)
-                avg_psnr += psnr
+            tvu.save_image(
+                x[0], os.path.join(self.args.image_folder, f"{idx_so_far}/ddnm.png")
+            )
 
+            orig = inverse_data_transform(config, x_orig[0])
+            diff = x[0].to(self.device) - orig
+
+            mse = torch.mean(diff ** 2)
+            psnr = 10 * torch.log10(1 / mse)
+            avg_psnr += psnr
+
+            norm_error = torch.norm(diff) / torch.norm(orig)
+            norm_error_orig_Ap_A_y = torch.norm(inverse_data_transform(config, Apy[0]) - orig) / torch.norm(orig)
+
+            with open(os.path.join(self.args.image_folder, f"{idx_so_far}/errors.txt"), mode='w') as f:
+                f.write(f"""
+                    MSE={mse}
+                    PSNR={psnr}
+                    Norm Error={norm_error}
+                    Norm Error Original and Ap(A(orig))={norm_error_orig_Ap_A_y}
+                """)
             idx_so_far += y.shape[0]
 
+            print("MSE: %f" % mse)
             pbar.set_description("PSNR: %.2f" % (avg_psnr / (idx_so_far - idx_init)))
 
         avg_psnr = avg_psnr / (idx_so_far - idx_init)

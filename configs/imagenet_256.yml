@@ -51,6 +51,6 @@ sampling:
     batch_size: 1
     
 time_travel:
-    T_sampling: 50
+    T_sampling: 100
     travel_length: 1
     travel_repeat: 1
