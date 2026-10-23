@@ -1,11 +1,12 @@
 ddnm:
-    blur_kernel_size: 5
-    blur_strength: 5
+    output_size: 256
     repeat_cnt: 4
     shift: 1
-    output_size: 256
-    cg_max_iter: 200
-    cg_rtol: 1e-7
+    blur_ksize: 15
+    blur_strength: 1
+    aberration_factor: 1.0
+    vignette_falloff: 0.8
+    mu: 1e-4
 
 data:
     dataset: "ImageNet"
@@ -51,6 +52,6 @@ sampling:
     batch_size: 1
     
 time_travel:
-    T_sampling: 100
-    travel_length: 1
-    travel_repeat: 1
+    T_sampling: 40
+    travel_length: 2
+    travel_repeat: 2

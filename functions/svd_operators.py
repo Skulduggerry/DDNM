@@ -1126,38 +1126,61 @@ class Deblurring(A_functions):
         return out_vec + out_eps
 
 
-def apply_A_1D(x, repeat_cnt, shift, ksize, blur_strength, out_size):
+def apply_A_1D(x, repeat_cnt, shift, blur_ksize, blur_strength, aberration_factor, vignette_falloff, out_size):
     # =========================
     # FELIX'S CODE
     # =========================
-    # reshape
-    b, c, w = x.shape
 
+    # ==============
+    # shifted repeat
+    # ==============
+    b, c, w = x.shape
     size = w - (repeat_cnt - 1) * shift
     patches = x.unfold(2, size, shift)
-    x = patches.reshape(b, c, size * repeat_cnt)
 
-    # blur
-    # TODO: change to Optical aberration
-    ksize_half = (ksize - 1) // 2
-    kernel = torch.linspace(-ksize_half, ksize_half, steps=ksize, device=x.device, dtype=x.dtype)
-    kernel = torch.exp(-0.5 * (kernel / blur_strength).pow(2))
-    kernel /= kernel.sum()
-    kernel = kernel.view(1, 1, ksize)
-    x = torch.nn.functional.pad(x, (ksize_half, ksize_half), mode='reflect')
-    x = torch.nn.functional.conv1d(x, kernel)
+    # reshape: x.shape = (b * repeat_cnt, c, size)
+    patches = patches.permute(0, 2, 1, 3).contiguous().reshape(b*repeat_cnt, c, size)
 
-    # TODO: apply vignetting
+    # ==========================
+    # spatially varying matrices
+    # ==========================
+    blur = torch.zeros((size, size), device=x.device, dtype=x.dtype)
+    vignette = torch.zeros(size, device=x.device, dtype=x.dtype)
 
-    # downsample
-    x = torch.nn.functional.adaptive_avg_pool1d(x, out_size)
+    center = (size-1) // 2
+    ksize_half = (blur_ksize - 1) // 2
 
-    return x
+    for i in range(size):
+        dist = abs(center - i) / center
+        
+        vignette[i] = math.exp(-(dist ** 2) / vignette_falloff)
+
+        sigma = blur_strength + aberration_factor * (dist ** 2)
+        start = max(0, i - ksize_half)
+        end = min(size, i + ksize_half + 1)
+        for j in range(start, end):
+            blur[i, j] = math.exp(-0.5 * ((j - i) / sigma) ** 2)
+        blur[i, :] /= blur[i].sum()
+
+    patches = torch.matmul(patches, blur)
+    patches = patches * vignette.view(1, 1, size)
+
+    # ============
+    # downsampling
+    # ============
+    lens_out_size = out_size // repeat_cnt
+    patches = torch.nn.functional.adaptive_avg_pool1d(patches, lens_out_size)
+
+    # ==================
+    # reshape: (b, c, w)
+    # ==================
+    patches = patches.reshape(b, repeat_cnt, c, lens_out_size).permute(0, 2, 1, 3)
+    patches = patches.contiguous().reshape(b, c, -1)
+    return patches
 
 
-# noinspection pep8-naming
 class TomboSVD(A_functions):
-    def __init__(self, channels, input_size, output_size, repeat_cnt, shift, blur_size, blur_strength, device, mu = 4e-4):
+    def __init__(self, channels, input_size, output_size, repeat_cnt, shift, blur_ksize, blur_strength, aberration_factor, vignette_falloff, mu, device):
         self.channels = channels
         self.in_size = input_size
         self.out_size = output_size
@@ -1165,7 +1188,7 @@ class TomboSVD(A_functions):
 
         # 1D matrix degradation
         I_mat = torch.eye(self.in_size, device=device).view(self.in_size, 1, self.in_size)
-        M = apply_A_1D(I_mat, repeat_cnt, shift, blur_size, blur_strength, output_size).squeeze(
+        M = apply_A_1D(I_mat, repeat_cnt, shift, blur_ksize, blur_strength, aberration_factor, vignette_falloff, output_size).squeeze(
             1).t()  # Shape: (out_size, in_size)
 
         # Compute 1D SVD

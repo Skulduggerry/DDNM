@@ -675,15 +675,17 @@ class Diffusion(object):
                                    self.config.data.image_size, self.device)
         elif deg == 'tombo':
             from functions.svd_operators import TomboSVD
-            A_funcs = TomboSVD(config.data.channels,
-                               config.data.image_size,
-                               config.ddnm.output_size,
-                               config.ddnm.repeat_cnt,
-                               config.ddnm.shift,
-                               config.ddnm.blur_kernel_size,
-                               config.ddnm.blur_strength,
-                               self.device,
-                               mu=4e-4)
+            A_funcs = TomboSVD(channels=config.data.channels,
+                               input_size=config.data.image_size,
+                               output_size=config.ddnm.output_size,
+                               repeat_cnt=config.ddnm.repeat_cnt,
+                               shift=config.ddnm.shift,
+                               blur_ksize=config.ddnm.blur_ksize,
+                               blur_strength=config.ddnm.blur_strength,
+                               aberration_factor=config.ddnm.aberration_factor,
+                               vignette_falloff=config.ddnm.vignette_falloff,
+                               mu=float(config.ddnm.mu),
+                               device=self.device)
         else:
             raise ValueError("degradation type not supported")
         args.sigma_y = 2 * args.sigma_y  # to account for scaling to [-1,1]
