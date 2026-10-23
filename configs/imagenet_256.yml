@@ -1,8 +1,8 @@
 ddnm:
-    blur_kernel_size: 11
-    blur_strength: 4
+    blur_kernel_size: 5
+    blur_strength: 5
     repeat_cnt: 4
-    shift: 7
+    shift: 1
     output_size: 256
     cg_max_iter: 200
     cg_rtol: 1e-7

@@ -1138,6 +1138,7 @@ def apply_A_1D(x, repeat_cnt, shift, ksize, blur_strength, out_size):
     x = patches.reshape(b, c, size * repeat_cnt)
 
     # blur
+    # TODO: change to Optical aberration
     ksize_half = (ksize - 1) // 2
     kernel = torch.linspace(-ksize_half, ksize_half, steps=ksize, device=x.device, dtype=x.dtype)
     kernel = torch.exp(-0.5 * (kernel / blur_strength).pow(2))
@@ -1145,6 +1146,8 @@ def apply_A_1D(x, repeat_cnt, shift, ksize, blur_strength, out_size):
     kernel = kernel.view(1, 1, ksize)
     x = torch.nn.functional.pad(x, (ksize_half, ksize_half), mode='reflect')
     x = torch.nn.functional.conv1d(x, kernel)
+
+    # TODO: apply vignetting
 
     # downsample
     x = torch.nn.functional.adaptive_avg_pool1d(x, out_size)
@@ -1218,8 +1221,7 @@ class TomboSVD(A_functions):
         return X.reshape(X.shape[0], -1)
 
     def Ut(self, vec):
-        Y = vec.reshape(-1, self.out_size ** 2, self.channels).permute(0, 2, 1)
-        Y = Y.reshape(-1, self.channels, self.out_size, self.out_size)
+        Y = vec.reshape(-1, self.channels, self.out_size, self.out_size)
         X = self.mat_by_img(self.Ut_small, Y, self.out_size)
         X = self.img_by_mat(X, self.U_small, self.out_size)
         return X.reshape(-1, self.channels, self.out_size ** 2).permute(0, 2, 1).reshape(vec.shape[0], -1)
@@ -1229,7 +1231,7 @@ class TomboSVD(A_functions):
         Y = Y.reshape(-1, self.channels, self.out_size, self.out_size)
         X = self.mat_by_img(self.U_small, Y, self.out_size)
         X = self.img_by_mat(X, self.Ut_small, self.out_size)
-        return X.reshape(-1, self.channels, self.out_size ** 2).permute(0, 2, 1).reshape(vec.shape[0], -1)
+        return X.reshape(vec.shape[0], -1)
 
     def singulars(self):
         return self._singulars.repeat_interleave(self.channels).reshape(-1)
