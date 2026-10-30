@@ -132,6 +132,24 @@ def ddnm_plus_diffusion(x, model, b, eta, A_funcs, y, sigma_y, cls_fn=None, clas
 
                 x0_preds.append(x0_t.to('cpu'))
                 xs.append(xt_next.to('cpu'))
+
+                os.makedirs("debug_ddnm/x0_t/", exist_ok=True)
+                tvu.save_image(
+                    inverse_data_transform(x0_t[0]),
+                    f"debug_ddnm/x0_t/x0_t_{i:04d}.png"
+                )
+
+                os.makedirs("debug_ddnm/x0_t_hat/", exist_ok=True)
+                tvu.save_image(
+                    inverse_data_transform(x0_t_hat[0]),
+                    f"debug_ddnm/x0_t_hat/x0_t_hat_{i:04d}.png"
+                )
+
+                os.makedirs("debug_ddnm/xt_next/", exist_ok=True)
+                tvu.save_image(
+                    inverse_data_transform(xt_next[0]),
+                    f"debug_ddnm/xt_next/xt_next_{i:04d}.png"
+                )
             else: # time-travel back
                 next_t = (torch.ones(n) * j).to(x.device)
                 at_next = compute_alpha(b, next_t.long())
@@ -140,26 +158,6 @@ def ddnm_plus_diffusion(x, model, b, eta, A_funcs, y, sigma_y, cls_fn=None, clas
                 xt_next = at_next.sqrt() * x0_t + torch.randn_like(x0_t) * (1 - at_next).sqrt()
 
                 xs.append(xt_next.to('cpu'))
-                
-#             #ablation
-#             if i%50==0:
-#                 os.makedirs('/userhome/wyh/ddnm/debug/x0t', exist_ok=True)
-#                 tvu.save_image(
-#                     inverse_data_transform(x0_t[0]),
-#                     os.path.join('/userhome/wyh/ddnm/debug/x0t', f"x0_t_{i}.png")
-#                 )
-                
-#                 os.makedirs('/userhome/wyh/ddnm/debug/x0_t_hat', exist_ok=True)
-#                 tvu.save_image(
-#                     inverse_data_transform(x0_t_hat[0]),
-#                     os.path.join('/userhome/wyh/ddnm/debug/x0_t_hat', f"x0_t_hat_{i}.png")
-#                 )
-                
-#                 os.makedirs('/userhome/wyh/ddnm/debug/xt_next', exist_ok=True)
-#                 tvu.save_image(
-#                     inverse_data_transform(xt_next[0]),
-#                     os.path.join('/userhome/wyh/ddnm/debug/xt_next', f"xt_next_{i}.png")
-#                 )
 
     return [xs[-1]], [x0_preds[-1]]
 

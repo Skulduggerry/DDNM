@@ -695,7 +695,7 @@ class Diffusion(object):
         idx_init = args.subset_start
         idx_so_far = args.subset_start
         avg_psnr_tombo = 0.0
-        avg_psnr_sr = 0.0
+        # avg_psnr_sr = 0.0
         pbar = tqdm.tqdm(val_loader)
         for x_orig, classes in pbar:
             x_orig = x_orig.to(self.device)
@@ -712,18 +712,19 @@ class Diffusion(object):
                 y = get_gaussian_noisy_img(y, sigma_y)
 
             # cut out
-            y_sr_only = y[:, :, :64, :64]
-            y_sr_only = y_sr_only.contiguous().reshape((b, -1))
-            y = y.reshape((b, hwc))
+            # y_sr_only = y[:, :, :64, :64]
+            # y_sr_only = y_sr_only.contiguous().reshape((b, -1))
+            # y = y.reshape((b, hwc))
 
-            from functions.svd_operators import SuperResolution
-            SR_funcs = SuperResolution(config.data.channels, config.data.image_size, 4, self.device)
+            # from functions.svd_operators import SuperResolution
+            # SR_funcs = SuperResolution(config.data.channels, config.data.image_size, 4, self.device)
 
             Apy = A_funcs.A_pinv(y).view(y.shape[0], config.data.channels, self.config.data.image_size,
                                          self.config.data.image_size)
-            Apy_sr_only = SR_funcs.A_pinv(y_sr_only).view(y_sr_only.shape[0], config.data.channels,
-                                                          self.config.data.image_size,
-                                                          self.config.data.image_size)
+            # Apy_sr_only = SR_funcs.A_pinv(y_sr_only).view(y_sr_only.shape[0],
+            #                                               config.data.channels,
+            #                                               self.config.data.image_size,
+            #                                               self.config.data.image_size)
 
             os.makedirs(os.path.join(self.args.image_folder, f"{idx_so_far}"), exist_ok=True)
             for i in range(len(Apy)):
@@ -732,18 +733,18 @@ class Diffusion(object):
                                                                 self.config.data.image_size)),
                     os.path.join(self.args.image_folder, f"{idx_so_far}/y.png")
                 )
-                tvu.save_image(
-                    inverse_data_transform(config, y_sr_only.reshape(self.config.data.channels, 64, 64)),
-                    os.path.join(self.args.image_folder, f"{idx_so_far}/y_sr_only.png")
-                )
+                # tvu.save_image(
+                #     inverse_data_transform(config, y_sr_only.reshape(self.config.data.channels, 64, 64)),
+                #     os.path.join(self.args.image_folder, f"{idx_so_far}/y_sr_only.png")
+                # )
                 tvu.save_image(
                     inverse_data_transform(config, Apy[i]),
                     os.path.join(self.args.image_folder, f"{idx_so_far}/Apy.png")
                 )
-                tvu.save_image(
-                    inverse_data_transform(config, Apy_sr_only[i]),
-                    os.path.join(self.args.image_folder, f"{idx_so_far}/Apy_sr_only.png")
-                )
+                # tvu.save_image(
+                #     inverse_data_transform(config, Apy_sr_only[i]),
+                #     os.path.join(self.args.image_folder, f"{idx_so_far}/Apy_sr_only.png")
+                # )
                 tvu.save_image(
                     inverse_data_transform(config, x_orig[i]),
                     os.path.join(self.args.image_folder, f"{idx_so_far}/orig.png")
@@ -758,52 +759,52 @@ class Diffusion(object):
                 device=self.device,
             )
 
-            x_sr_only = torch.randn(
-                y_sr_only.shape[0],
-                config.data.channels,
-                config.data.image_size,
-                config.data.image_size,
-                device=self.device,
-            )
+            # x_sr_only = torch.randn(
+            #     y_sr_only.shape[0],
+            #     config.data.channels,
+            #     config.data.image_size,
+            #     config.data.image_size,
+            #     device=self.device,
+            # )
 
             with torch.no_grad():
                 if sigma_y == 0.:  # noise-free case, turn to ddnm
                     x, _ = ddnm_diffusion(x, model, self.betas, self.args.eta, A_funcs, y, cls_fn=cls_fn,
                                           classes=classes, config=config)
-                    x_sr_only, _ = ddnm_diffusion(x_sr_only, model, self.betas, self.args.eta, SR_funcs, y_sr_only,
-                                                  cls_fn=cls_fn,
-                                                  classes=classes, config=config)
+                    # x_sr_only, _ = ddnm_diffusion(x_sr_only, model, self.betas, self.args.eta, SR_funcs, y_sr_only,
+                    #                               cls_fn=cls_fn,
+                    #                               classes=classes, config=config)
                 else:  # noisy case, turn to ddnm+
                     x, _ = ddnm_plus_diffusion(x, model, self.betas, self.args.eta, A_funcs, y, sigma_y, cls_fn=cls_fn,
                                                classes=classes, config=config)
-                    x_sr_only, _ = ddnm_plus_diffusion(x_sr_only, model, self.betas, self.args.eta, SR_funcs, y_sr_only,
-                                                       sigma_y, cls_fn=cls_fn,
-                                                       classes=classes, config=config)
+                    # x_sr_only, _ = ddnm_plus_diffusion(x_sr_only, model, self.betas, self.args.eta, SR_funcs, y_sr_only,
+                    #                                    sigma_y, cls_fn=cls_fn,
+                    #                                    classes=classes, config=config)
 
             x = [inverse_data_transform(config, xi) for xi in x]
-            x_sr_only = [inverse_data_transform(config, xi) for xi in x_sr_only]
+            # x_sr_only = [inverse_data_transform(config, xi) for xi in x_sr_only]
 
             tvu.save_image(
                 x[0], os.path.join(self.args.image_folder, f"{idx_so_far}/tombo_ddnm+.png")
             )
-            tvu.save_image(
-                x_sr_only[0], os.path.join(self.args.image_folder, f"{idx_so_far}/sr_ddnm+.png")
-            )
+            # tvu.save_image(
+            #     x_sr_only[0], os.path.join(self.args.image_folder, f"{idx_so_far}/sr_ddnm+.png")
+            # )
 
             orig = inverse_data_transform(config, x_orig[0])[:,4:252,4:252]
             diff_tombo = x[0][:, :, 4:252, 4:252].to(self.device) - orig
-            diff_sr = x_sr_only[0][:, :, 4:252, 4:252].to(self.device) - orig
+            # diff_sr = x_sr_only[0][:, :, 4:252, 4:252].to(self.device) - orig
 
             mse_tombo = torch.mean(diff_tombo ** 2)
             psnr_tombo = 10 * torch.log10(1 / mse_tombo)
             avg_psnr_tombo += psnr_tombo
 
-            mse_sr = torch.mean(diff_sr ** 2)
-            psnr_sr = 10 * torch.log10(1 / mse_sr)
-            avg_psnr_sr += psnr_sr
+            # mse_sr = torch.mean(diff_sr ** 2)
+            # psnr_sr = 10 * torch.log10(1 / mse_sr)
+            # avg_psnr_sr += psnr_sr
 
             norm_error_tombo = torch.norm(diff_tombo) / torch.norm(orig)
-            norm_error_sr = torch.norm(diff_sr) / torch.norm(orig)
+            # norm_error_sr = torch.norm(diff_sr) / torch.norm(orig)
 
             with open(os.path.join(self.args.image_folder, f"{idx_so_far}/errors.txt"), mode='w') as f:
                 f.write(f"""
@@ -811,27 +812,35 @@ class Diffusion(object):
                     MSE={mse_tombo}
                     PSNR={psnr_tombo}
                     Norm Error={norm_error_tombo}
-                    
-                    SR:
-                    MSE={mse_sr}
-                    PSNR={psnr_sr}
-                    Norm Error={norm_error_sr}
-                """)
+                    """)
+                # f.write(f"""
+                #     TOMBO:
+                #     MSE={mse_tombo}
+                #     PSNR={psnr_tombo}
+                #     Norm Error={norm_error_tombo}
+                #
+                #     SR:
+                #     MSE={mse_sr}
+                #     PSNR={psnr_sr}
+                #     Norm Error={norm_error_sr}
+                # """)
             idx_so_far += y.shape[0]
 
-            pbar.set_description(f"PSNR TOMBO={avg_psnr_tombo / (idx_so_far - idx_init):.2f}, SR={avg_psnr_sr / (idx_so_far - idx_init):.2f}")
+            # pbar.set_description(f"PSNR TOMBO={avg_psnr_tombo / (idx_so_far - idx_init):.2f}, SR={avg_psnr_sr / (idx_so_far - idx_init):.2f}")
+            pbar.set_description(f"PSNR TOMBO={avg_psnr_tombo / (idx_so_far - idx_init):.2f}")
 
         avg_psnr_tombo = avg_psnr_tombo / (idx_so_far - idx_init)
-        avg_psnr_sr = avg_psnr_sr / (idx_so_far - idx_init)
+        # avg_psnr_sr = avg_psnr_sr / (idx_so_far - idx_init)
 
         with open(os.path.join(self.args.image_folder, f"errors.txt"), mode='w') as f:
-            f.write(f"""
-                Total Average PSNR (TOMBO)={avg_psnr_tombo}
-                Total Average PSNR (SR)={avg_psnr_sr}
-            """)
+            f.write(f"Total Average PSNR (TOMBO)={avg_psnr_tombo}")
+            # f.write(f"""
+            #     Total Average PSNR (TOMBO)={avg_psnr_tombo}
+            #     Total Average PSNR (SR)={avg_psnr_sr}
+            # """)
 
         print("Total Average PSNR (TOMBO): %.2f" % avg_psnr_tombo)
-        print("Total Average PSNR (SR): %.2f" % avg_psnr_sr)
+        # print("Total Average PSNR (SR): %.2f" % avg_psnr_sr)
         print("Number of samples: %d" % (idx_so_far - idx_init))
 
 

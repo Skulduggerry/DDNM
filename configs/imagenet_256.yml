@@ -5,8 +5,8 @@ ddnm:
     blur_ksize: 15
     blur_strength: 1
     aberration_factor: 1.0
-    vignette_falloff: 0.8
-    mu: 1e-4
+    vignette_falloff: 1.5
+    mu: 4e-7
 
 data:
     dataset: "ImageNet"
@@ -52,6 +52,6 @@ sampling:
     batch_size: 1
     
 time_travel:
-    T_sampling: 40
-    travel_length: 2
-    travel_repeat: 2
+    T_sampling: 100
+    travel_length: 1
+    travel_repeat: 1

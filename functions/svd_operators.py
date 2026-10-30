@@ -1,9 +1,6 @@
-import torch
-import cv2
-import numpy as np
-import torch.nn as nn
-import torch.nn.functional as F
 import math
+
+import torch
 
 
 class A_functions:
@@ -484,9 +481,8 @@ class Denoising(A_functions):
         else:
             return vec * sigma_t * eta
 
-        # Super Resolution
 
-
+# Super Resolution
 class SuperResolution(A_functions):
     def __init__(self, channels, img_dim, ratio, device):  # ratio = 2 or 4
         assert img_dim % ratio == 0
@@ -1268,11 +1264,12 @@ class TomboSVD(A_functions):
         temp = self.Ut(vec)
         singulars = self.singulars().unsqueeze(0)
 
-        # inverse_singulars = 1. / singulars
-        # inverse_singulars[singulars < self.mu] = 0.
-        inverse_singulars = singulars / (singulars ** 2 + self.mu)
-        temp = temp * inverse_singulars
+        cutoff = 1e-6 * singulars.max()
+        keep = singulars > cutoff
+        inv_s = torch.zeros_like(singulars)
+        inv_s[keep] = 1.0 / singulars[keep]
 
+        temp = temp.clone() * inv_s
         temp = self.add_zeros(temp)
         return self.V(temp)
 
@@ -1282,12 +1279,13 @@ class TomboSVD(A_functions):
         lambda_t = torch.ones(self.in_size ** 2, device=vec.device)
 
         singulars = self._singulars_full
-        # inverse_singulars = 1. / singulars
-        # inverse_singulars[singulars < self.mu] = 0.
-        inverse_singulars = singulars / (singulars ** 2 + self.mu)
+        cutoff = 1e-6 * singulars.max()
+        keep = singulars > cutoff
+        inv_s = torch.zeros_like(singulars)
+        inv_s[keep] = 1.0 / singulars[keep]
 
         if a != 0 and sigma_y != 0:
-            change_index = (sigma_t < a * sigma_y * inverse_singulars) * 1.0
+            change_index = (sigma_t < a * sigma_y * inv_s) * 1.0
             lambda_t = lambda_t * (-change_index + 1.0) + change_index * (
                     singulars * sigma_t * (1 - eta ** 2) ** 0.5 / a / sigma_y)
 
@@ -1304,19 +1302,22 @@ class TomboSVD(A_functions):
         d2_t = torch.ones(self.in_size ** 2, device=vec.device) * sigma_t * (1 - eta ** 2) ** 0.5
 
         singulars = self._singulars_full
-        inverse_singulars = singulars / (singulars ** 2 + self.mu)
+        cutoff = 1e-6 * singulars.max()
+        keep = singulars > cutoff
+        inv_s = torch.zeros_like(singulars)
+        inv_s[keep] = 1.0 / singulars[keep]
 
         if a != 0 and sigma_y != 0:
-            change_index = (sigma_t < a * sigma_y * inverse_singulars) * 1.0
+            change_index = (sigma_t < a * sigma_y * inv_s) * 1.0
             d1_t = d1_t * (-change_index + 1.0) + change_index * sigma_t * eta
             d2_t = d2_t * (-change_index + 1.0)
 
-            change_index = (sigma_t > a * sigma_y * inverse_singulars) * 1.0
+            change_index = (sigma_t > a * sigma_y * inv_s) * 1.0
             d1_t = d1_t * (-change_index + 1.0) + torch.sqrt(
-                change_index * (sigma_t ** 2 - a ** 2 * sigma_y ** 2 * inverse_singulars ** 2))
+                change_index * (sigma_t ** 2 - a ** 2 * sigma_y ** 2 * inv_s ** 2))
             d2_t = d2_t * (-change_index + 1.0)
 
-            change_index = (singulars < 1e-5) * 1.0
+            change_index = (singulars < cutoff) * 1.0
             d1_t = d1_t * (-change_index + 1.0) + change_index * sigma_t * eta
             d2_t = d2_t * (-change_index + 1.0) + change_index * sigma_t * (1 - eta ** 2) ** 0.5
 
