@@ -133,23 +133,23 @@ def ddnm_plus_diffusion(x, model, b, eta, A_funcs, y, sigma_y, cls_fn=None, clas
                 x0_preds.append(x0_t.to('cpu'))
                 xs.append(xt_next.to('cpu'))
 
-                os.makedirs("debug_ddnm/x0_t/", exist_ok=True)
-                tvu.save_image(
-                    inverse_data_transform(x0_t[0]),
-                    f"debug_ddnm/x0_t/x0_t_{i:04d}.png"
-                )
-
-                os.makedirs("debug_ddnm/x0_t_hat/", exist_ok=True)
-                tvu.save_image(
-                    inverse_data_transform(x0_t_hat[0]),
-                    f"debug_ddnm/x0_t_hat/x0_t_hat_{i:04d}.png"
-                )
-
-                os.makedirs("debug_ddnm/xt_next/", exist_ok=True)
-                tvu.save_image(
-                    inverse_data_transform(xt_next[0]),
-                    f"debug_ddnm/xt_next/xt_next_{i:04d}.png"
-                )
+                # os.makedirs("debug_ddnm/x0_t/", exist_ok=True)
+                # tvu.save_image(
+                #     inverse_data_transform(x0_t[0]),
+                #     f"debug_ddnm/x0_t/x0_t_{i:04d}.png"
+                # )
+                #
+                # os.makedirs("debug_ddnm/x0_t_hat/", exist_ok=True)
+                # tvu.save_image(
+                #     inverse_data_transform(x0_t_hat[0]),
+                #     f"debug_ddnm/x0_t_hat/x0_t_hat_{i:04d}.png"
+                # )
+                #
+                # os.makedirs("debug_ddnm/xt_next/", exist_ok=True)
+                # tvu.save_image(
+                #     inverse_data_transform(xt_next[0]),
+                #     f"debug_ddnm/xt_next/xt_next_{i:04d}.png"
+                # )
             else: # time-travel back
                 next_t = (torch.ones(n) * j).to(x.device)
                 at_next = compute_alpha(b, next_t.long())

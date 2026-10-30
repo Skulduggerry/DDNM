@@ -6,6 +6,9 @@ ddnm:
     blur_strength: 1
     aberration_factor: 1.0
     vignette_falloff: 1.5
+    cg_rtol: 1e-5
+    cg_max_iter: 30
+
     mu: 4e-7
 
 data:

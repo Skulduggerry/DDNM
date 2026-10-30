@@ -4,7 +4,6 @@ import random
 import numpy as np
 import torch
 import torch.utils.data as data
-import torchvision
 import torchvision.utils as tvu
 import tqdm
 
@@ -90,17 +89,43 @@ def apply_A(x, config):
     # =========================
     repeat_cnt = config.ddnm.repeat_cnt
     shift = config.ddnm.shift
-    blur_ksize = config.ddnm.blur_kernel_size
+    blur_ksize = config.ddnm.blur_ksize
     blur_strength = config.ddnm.blur_strength
-    outsize = config.ddnm.output_size
+    aberration_factor = config.ddnm.aberration_factor
+    vignette_falloff = config.ddnm.vignette_falloff
+    out_size = config.ddnm.output_size
 
-    shifted = shifted_repeat(x, repeat_cnt, shift)
-    blurred = torchvision.transforms.GaussianBlur([blur_ksize, blur_ksize], blur_strength).forward(shifted)
-    downsampled = torch.nn.AdaptiveAvgPool2d((outsize, outsize)).forward(blurred)
-    return downsampled
+    # =====
+    # Shift
+    # =====
+    b, c, h, w = x.shape
+    assert h == w
+    size = w - (repeat_cnt - 1) * shift
+    patches = x.unfold(2, size, shift).unfold(3, size, shift)
+
+    # permute + reshape: (b, c, repeat_cnt, repeat_cnt, size, size) -> (b * repeat_cnt ** 2, c, size, size)
+    B_lenses = b * repeat_cnt ** 2
+    patches = patches.permute(0, 2, 3, 1, 4, 5).contiguous().reshape(B_lenses, c, size, size)
+
+    # ==================
+    # optical aberration
+    # ==================
+
+    # ============
+    # downsampling
+    # ============
+    lens_out_size = out_size // repeat_cnt
+    assert lens_out_size * repeat_cnt == out_size
+    patches = torch.nn.functional.adaptive_avg_pool2d(patches, (lens_out_size, lens_out_size))
+
+    # reshape + permute: (b * repeat_cnt ** 2, c, size, size) -> (b, c, out_size, out_size)
+    patches = patches.reshape(b, repeat_cnt, repeat_cnt, c, lens_out_size, lens_out_size).permute(0, 3, 1, 4, 2, 5)
+    patches = patches.contiguous().reshape(b, c, out_size, out_size)
+
+    return patches
 
 
-def cg(A_op, b, rtol=1e-10, max_iter=200):
+def cg(A_op, b, rtol=1e-5, max_iter=30):
     x = torch.zeros_like(b)
     r = b.clone()
     p = r.clone()
@@ -134,8 +159,10 @@ def apply_Ap_cg(y, config):
     # =========================
     # FELIX'S CODE
     # =========================
-    in_size = config.ddnm.input_size
     b, c, h, w = y.shape
+    assert h == w
+
+    in_size = config.data.image_size
     rtol = float(config.ddnm.cg_rtol)
     max_iter = config.ddnm.cg_max_iter
 
@@ -147,61 +174,6 @@ def apply_Ap_cg(y, config):
 
         At_y = At_fn(y)
         return cg(AtA_fn, At_y, rtol=rtol, max_iter=max_iter)
-
-def apply_A_1D(x, config):
-    # =========================
-    # FELIX'S CODE
-    # =========================
-    # reshape
-    b, c, w = x.shape
-    repeat_cnt = config.ddnm.repeat_cnt
-    shift = config.ddnm.shift
-    kernel_size = config.ddnm.blur_kernel_size
-    sigma = config.ddnm.blur_strength
-    outsize = config.ddnm.output_size
-
-    size = w - (repeat_cnt - 1) * shift
-    patches = x.unfold(2, size, shift)
-    x = patches.reshape(b, c, size * repeat_cnt)
-
-    # blur
-    ksize_half = (kernel_size - 1) // 2
-    kernel = torch.linspace(-ksize_half, ksize_half, steps=kernel_size, device=x.device, dtype=x.dtype)
-    kernel = torch.exp(-0.5 * (kernel / sigma).pow(2))
-    kernel /= kernel.sum()
-    kernel = kernel.view(1, 1, kernel_size)
-    x = torch.nn.functional.pad(x, (ksize_half, ksize_half), mode='reflect')
-    x = torch.nn.functional.conv1d(x, kernel)
-
-    # downsample
-    x = torch.nn.functional.adaptive_avg_pool1d(x, outsize)
-
-    return x
-
-
-def get_Mp(dtype, config):
-    # =========================
-    # FELIX'S CODE
-    # =========================
-    in_size = config.data.image_size
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    I = torch.eye(in_size, device=device, dtype=dtype).view(in_size, 1, in_size)
-    M = apply_A_1D(I, config).squeeze(1).t()
-    return torch.linalg.pinv(M)
-
-
-Mp = None
-
-
-def apply_Ap_seperable(y: torch.Tensor, config):
-    # =========================
-    # FELIX'S CODE
-    # =========================
-    global Mp
-    if Mp is None or Mp.dtype is not y.dtype:
-        Mp = get_Mp(y.dtype, config)
-
-    return Mp @ y @ Mp.t()
 
 
 class Diffusion(object):
@@ -402,9 +374,6 @@ class Diffusion(object):
         elif args.deg == 'diy_cg':
             A = lambda x: apply_A(x, config)
             Ap = lambda y: apply_Ap_cg(y, config)
-        elif args.deg == 'diy_separable':
-            A = lambda x: apply_A(x, config)
-            Ap = lambda y: apply_Ap_seperable(y, config)
         else:
             raise NotImplementedError("degradation type not supported")
 
@@ -414,7 +383,10 @@ class Diffusion(object):
         print(f'Start from {args.subset_start}')
         idx_init = args.subset_start
         idx_so_far = args.subset_start
+        avg_mse = 0.0
         avg_psnr = 0.0
+        avg_norm_error = 0.0
+        avg_norm_error_orig_Ap_A_y= 0.0
         pbar = tqdm.tqdm(val_loader)
 
         for x_orig, classes in pbar:
@@ -547,25 +519,40 @@ class Diffusion(object):
             diff = x[0].to(self.device) - orig
 
             mse = torch.mean(diff ** 2)
+            avg_mse += mse
             psnr = 10 * torch.log10(1 / mse)
             avg_psnr += psnr
 
             norm_error = torch.norm(diff) / torch.norm(orig)
+            avg_norm_error += norm_error
             norm_error_orig_Ap_A_y = torch.norm(inverse_data_transform(config, Apy[0]) - orig) / torch.norm(orig)
+            avg_norm_error_orig_Ap_A_y += norm_error_orig_Ap_A_y
 
             with open(os.path.join(self.args.image_folder, f"{idx_so_far}/errors.txt"), mode='w') as f:
                 f.write(f"""
                     MSE={mse}
                     PSNR={psnr}
                     Norm Error={norm_error}
-                    Norm Error Original and Ap(A(orig))={norm_error_orig_Ap_A_y}
+                    Norm Error Ap(A(y))={norm_error_orig_Ap_A_y}
                 """)
             idx_so_far += y.shape[0]
 
             print("MSE: %f" % mse)
             pbar.set_description("PSNR: %.2f" % (avg_psnr / (idx_so_far - idx_init)))
 
-        avg_psnr = avg_psnr / (idx_so_far - idx_init)
+        avg_mse /= (idx_so_far - idx_init)
+        avg_psnr /= (idx_so_far - idx_init)
+        avg_norm_error /= (idx_so_far - idx_init)
+        avg_norm_error_orig_Ap_A_y /= (idx_so_far - idx_init)
+
+        with open(os.path.join(self.args.image_folder, f"errors.txt"), mode='w') as f:
+            f.write(f"""
+                Total Average MSE={avg_mse}
+                Total Average PSNR={avg_psnr}
+                Total Average Norm Error={avg_norm_error}
+                Total Average Norm Error Ap(A(y))={avg_norm_error_orig_Ap_A_y}
+            """)
+
         print("Total Average PSNR: %.2f" % avg_psnr)
         print("Number of samples: %d" % (idx_so_far - idx_init))
 
@@ -791,7 +778,7 @@ class Diffusion(object):
             #     x_sr_only[0], os.path.join(self.args.image_folder, f"{idx_so_far}/sr_ddnm+.png")
             # )
 
-            orig = inverse_data_transform(config, x_orig[0])[:,4:252,4:252]
+            orig = inverse_data_transform(config, x_orig[0])[:, 4:252, 4:252]
             diff_tombo = x[0][:, :, 4:252, 4:252].to(self.device) - orig
             # diff_sr = x_sr_only[0][:, :, 4:252, 4:252].to(self.device) - orig
 
