@@ -4,6 +4,7 @@ import random
 import numpy as np
 import torch
 import torch.utils.data as data
+import torchvision
 import torchvision.utils as tvu
 import tqdm
 
@@ -16,27 +17,6 @@ from guided_diffusion.script_util import create_model, create_classifier, classi
 
 def get_gaussian_noisy_img(img, noise_level):
     return img + torch.randn_like(img).cuda() * noise_level
-
-
-def MeanUpsample(x, scale):
-    n, c, h, w = x.shape
-    out = torch.zeros(n, c, h, scale, w, scale).to(x.device) + x.view(n, c, h, 1, w, 1)
-    out = out.view(n, c, scale * h, scale * w)
-    return out
-
-
-def color2gray(x):
-    coef = 1 / 3
-    x = x[:, 0, :, :] * coef + x[:, 1, :, :] * coef + x[:, 2, :, :] * coef
-    return x.repeat(1, 3, 1, 1)
-
-
-def gray2color(x):
-    x = x[:, 0, :, :]
-    coef = 1 / 3
-    base = coef ** 2 + coef ** 2 + coef ** 2
-    return torch.stack((x * coef / base, x * coef / base, x * coef / base), 1)
-
 
 def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_timesteps):
     def sigmoid(x):
@@ -71,18 +51,6 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
     return betas
 
 
-def shifted_repeat(x, repeat_cnt, shift):
-    # =========================
-    # FELIX'S CODE
-    # =========================
-    b, c, h, w = x.shape
-    size = w - (repeat_cnt - 1) * shift
-    patches = x.unfold(2, size, shift).unfold(3, size, shift)
-    patches = patches.permute(0, 1, 2, 4, 3, 5)
-    out = patches.reshape(b, c, size * repeat_cnt, size * repeat_cnt)
-    return out
-
-
 def apply_A(x, config):
     # =========================
     # FELIX'S CODE
@@ -110,6 +78,7 @@ def apply_A(x, config):
     # ==================
     # optical aberration
     # ==================
+    patches = torchvision.transforms.functional.gaussian_blur(patches, (blur_ksize, blur_ksize), sigma=blur_strength)
 
     # ============
     # downsampling
@@ -125,54 +94,89 @@ def apply_A(x, config):
     return patches
 
 
-def cg(A_op, b, rtol=1e-5, max_iter=30):
+def cg(A_op, b, rtol, max_iter):
     x = torch.zeros_like(b)
     r = b.clone()
     p = r.clone()
-    rsold = torch.sum(r * r)
-    bnorm = torch.norm(b)
 
-    if bnorm < 1e-12:
-        return x
+    rsold = torch.sum(r * r)
+    bnorm = torch.linalg.vector_norm(b).clamp_min(1e-12)
 
     for i in range(max_iter):
         Ap = A_op(p)
-        alpha = rsold / torch.sum(p * Ap)
+
+        denom = torch.sum(p * Ap)
+
+        if not torch.isfinite(denom) or denom <= 1e-20:
+            break
+
+        alpha = rsold / denom
+
         x = x + alpha * p
         r = r - alpha * Ap
 
-        if torch.norm(r) / bnorm < rtol:
-            # print(f"CG converged after {i + 1} iterations")
+        if torch.linalg.vector_norm(r) / bnorm < rtol:
             break
 
         rsnew = torch.sum(r * r)
-        p = r + (rsnew / rsold) * p
+
+        if not torch.isfinite(rsnew):
+            break
+
+        p = r + (rsnew / rsold.clamp_min(1e-30)) * p
         rsold = rsnew
-    else:
-        pass
-        # print("CG reached max_iter without hitting rtol")
 
     return x
 
 
-def apply_Ap_cg(y, config):
-    # =========================
-    # FELIX'S CODE
-    # =========================
+def make_A_At(config, x_template):
+    A_fn = lambda x: apply_A(x, config)
+
+    # Construct the VJP while gradient tracking is enabled.
+    with torch.enable_grad():
+        _, vjp_fn = torch.func.vjp(A_fn, x_template)
+
+    def At_fn(y):
+        with torch.enable_grad():
+            return vjp_fn(y)[0]
+
+    return A_fn, At_fn
+
+
+A_fn, At_fn = None, None
+
+
+def apply_Ap_cg(y, config, current_t):
+    global A_fn, At_fn
+
     b, c, h, w = y.shape
     assert h == w
 
-    in_size = config.data.image_size
-    rtol = float(config.ddnm.cg_rtol)
-    max_iter = config.ddnm.cg_max_iter
+    rtol = max(float(config.ddnm.cg_rtol), 1e-2)
+
+    # The timestep threshold where noise begins to dominate (assume 1000-step schedule)
+    critical_window = 150.0
+
+    if current_t < critical_window:
+        progress = (critical_window - current_t) / critical_window
+        rho = 1e-3 + progress * (3e-2 - 1e-3)
+        max_iter_base = 30
+        max_iter = max(3, int(max_iter_base - progress * (max_iter_base - 3)))
+    else:
+        rho = 1e-3
+        max_iter = 30
+
+    if A_fn is None or At_fn is None:
+        x_template = torch.zeros(
+            (1, config.data.channels, config.data.image_size, config.data.image_size),
+            device=y.device,
+            dtype=y.dtype,
+        )
+        A_fn, At_fn = make_A_At(config, x_template)
 
     with torch.no_grad():
-        x0 = torch.zeros((b, c, in_size, in_size), device=y.device, dtype=y.dtype)
-        _, vjp_fn = torch.func.vjp(lambda x: apply_A(x, config), x0)
-        At_fn = lambda v: vjp_fn(v)[0]
-        AtA_fn = lambda x: At_fn(apply_A(x, config))
-
         At_y = At_fn(y)
+        AtA_fn = lambda x: At_fn(A_fn(x)) + rho * x
         return cg(AtA_fn, At_y, rtol=rtol, max_iter=max_iter)
 
 
@@ -312,8 +316,6 @@ class Diffusion(object):
 
         dataset, test_dataset = get_dataset(args, config)
 
-        device_count = torch.cuda.device_count()
-
         if args.subset_start >= 0 and args.subset_end > 0:
             assert args.subset_end > args.subset_start
             test_dataset = torch.utils.data.Subset(test_dataset, range(args.subset_start, args.subset_end))
@@ -341,39 +343,9 @@ class Diffusion(object):
 
         # get degradation operator
         print("args.deg:", args.deg)
-        if args.deg == 'colorization':
-            A = lambda z: color2gray(z)
-            Ap = lambda z: gray2color(z)
-        elif args.deg == 'denoising':
-            A = lambda z: z
-            Ap = A
-        elif args.deg == 'sr_averagepooling':
-            scale = round(args.deg_scale)
-            A = torch.nn.AdaptiveAvgPool2d((256 // scale, 256 // scale))
-            Ap = lambda z: MeanUpsample(z, scale)
-        elif args.deg == 'inpainting':
-            loaded = np.load("exp/inp_masks/mask.npy")
-            mask = torch.from_numpy(loaded).to(self.device)
-            A = lambda z: z * mask
-            Ap = A
-        elif args.deg == 'mask_color_sr':
-            loaded = np.load("exp/inp_masks/mask.npy")
-            mask = torch.from_numpy(loaded).to(self.device)
-            A1 = lambda z: z * mask
-            A1p = A1
-
-            A2 = lambda z: color2gray(z)
-            A2p = lambda z: gray2color(z)
-
-            scale = round(args.deg_scale)
-            A3 = torch.nn.AdaptiveAvgPool2d((256 // scale, 256 // scale))
-            A3p = lambda z: MeanUpsample(z, scale)
-
-            A = lambda z: A3(A2(A1(z)))
-            Ap = lambda z: A1p(A2p(A3p(z)))
-        elif args.deg == 'diy_cg':
+        if args.deg == 'diy_cg':
             A = lambda x: apply_A(x, config)
-            Ap = lambda y: apply_Ap_cg(y, config)
+            Ap = lambda y, t: apply_Ap_cg(y, config, t)
         else:
             raise NotImplementedError("degradation type not supported")
 
@@ -386,7 +358,7 @@ class Diffusion(object):
         avg_mse = 0.0
         avg_psnr = 0.0
         avg_norm_error = 0.0
-        avg_norm_error_orig_Ap_A_y= 0.0
+        avg_norm_error_orig_Ap_A_y = 0.0
         pbar = tqdm.tqdm(val_loader)
 
         for x_orig, classes in pbar:
@@ -402,7 +374,7 @@ class Diffusion(object):
             if config.sampling.batch_size != 1:
                 raise ValueError("please change the config file to set batch size as 1")
 
-            Apy = Ap(y)
+            Apy = Ap(y, 1000)
 
             # validate the pseudo inverse with high precision
             # ApAApy = Ap(A(Apy))
@@ -459,7 +431,6 @@ class Diffusion(object):
                         next_t = (torch.ones(n) * j).to(x.device)
                         at = compute_alpha(self.betas, t.long())
                         at_next = compute_alpha(self.betas, next_t.long())
-                        sigma_t = (1 - at_next ** 2).sqrt()
                         xt = xs[-1].to('cuda')
 
                         et = model(xt, t)
@@ -471,23 +442,23 @@ class Diffusion(object):
                         x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
 
                         # Eq. 19
-                        if sigma_t >= at_next * sigma_y:
+                        at_next_sqrt = at_next.sqrt()
+                        sigma_t = (1 - at_next).sqrt()
+
+                        if sigma_t >= at_next_sqrt * sigma_y:
                             lambda_t = 1.
-                            gamma_t = (sigma_t ** 2 - (at_next * sigma_y) ** 2).sqrt()
+                            gamma_t = (sigma_t ** 2 - (at_next_sqrt * sigma_y) ** 2).clamp_min(1e-6).sqrt()
                         else:
-                            lambda_t = (sigma_t) / (at_next * sigma_y)
+                            lambda_t = sigma_t / (at_next_sqrt * sigma_y).clamp_min(1e-8)
                             gamma_t = 0.
 
                         # Eq. 17
-                        x0_t_hat = x0_t - lambda_t * Ap(A(x0_t) - y)
+                        x0_t_hat = x0_t - lambda_t * Ap(A(x0_t) - y, i)
 
-                        eta = self.args.eta
+                        coeff_et = (sigma_t ** 2 - gamma_t ** 2).clamp_min(0.).sqrt()
+                        coeff_eps = gamma_t
 
-                        c1 = (1 - at_next).sqrt() * eta
-                        c2 = (1 - at_next).sqrt() * ((1 - eta ** 2) ** 0.5)
-
-                        # different from the paper, we use DDIM here instead of DDPM
-                        xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (c1 * torch.randn_like(x0_t) + c2 * et)
+                        xt_next = at_next_sqrt * x0_t_hat + coeff_et * et + coeff_eps * torch.randn_like(x0_t)
 
                         x0_preds.append(x0_t.to('cpu'))
                         xs.append(xt_next.to('cpu'))
