@@ -7,7 +7,6 @@ ddnm:
     aberration_factor: 1.0
     vignette_falloff: 1.5
 
-    cg_switch: 150
     cg_rtol: 5e-2
 
 data:

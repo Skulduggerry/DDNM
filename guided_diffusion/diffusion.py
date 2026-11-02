@@ -154,9 +154,7 @@ def apply_Ap_cg(y, config, current_t):
 
     rtol = max(float(config.ddnm.cg_rtol), 1e-2)
 
-    # The timestep threshold where noise begins to dominate (assume 1000-step schedule)
     critical_window = 150.0
-
     if current_t < critical_window:
         progress = (critical_window - current_t) / critical_window
         rho = 1e-3 + progress * (3e-2 - 1e-3)
