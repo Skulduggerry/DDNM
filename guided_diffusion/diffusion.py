@@ -152,7 +152,7 @@ def apply_Ap_cg(y, config, current_t):
     b, c, h, w = y.shape
     assert h == w
 
-    rtol = max(float(config.ddnm.cg_rtol), 1e-2)
+    rtol = 1e-2
 
     critical_window = 150.0
     if current_t < critical_window:
