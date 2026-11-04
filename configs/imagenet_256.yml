@@ -4,10 +4,13 @@ ddnm:
     shift: 1
     blur_ksize: 15
     blur_strength: 1
-    aberration_factor: 1.0
-    vignette_falloff: 1.5
 
-    cg_rtol: 5e-2
+    cg_rtol: 1e-2
+    cg_rho_base: 1e-3
+    cg_rho_progressive: 3e-2
+    cg_max_iter_base: 30
+    cg_max_iter_progressive: 3
+    cg_critical_window: 150
 
 data:
     dataset: "ImageNet"

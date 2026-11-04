@@ -59,8 +59,6 @@ def apply_A(x, config):
     shift = config.ddnm.shift
     blur_ksize = config.ddnm.blur_ksize
     blur_strength = config.ddnm.blur_strength
-    aberration_factor = config.ddnm.aberration_factor
-    vignette_falloff = config.ddnm.vignette_falloff
     out_size = config.ddnm.output_size
 
     # =====
@@ -152,17 +150,20 @@ def apply_Ap_cg(y, config, current_t):
     b, c, h, w = y.shape
     assert h == w
 
-    rtol = 1e-2
+    rtol = float(config.ddnm.cg_rtol)
+    rho_base = float(config.ddnm.cg_rho_base)
+    rho_progressive = float(config.ddnm.cg_rho_progressive)
+    max_iter_base = int(config.ddnm.cg_max_iter_base)
+    max_iter_progressive = int(config.ddnm.cg_max_iter_progressive)
+    critical_window = int(config.ddnm.cg_critical_window)
 
-    critical_window = 150.0
     if current_t < critical_window:
         progress = (critical_window - current_t) / critical_window
-        rho = 1e-3 + progress * (3e-2 - 1e-3)
-        max_iter_base = 30
-        max_iter = max(3, int(max_iter_base - progress * (max_iter_base - 3)))
+        rho = rho_base + progress * (rho_progressive - rho_base)
+        max_iter = max(max_iter_progressive, int(max_iter_base - progress * (max_iter_base - max_iter_progressive)))
     else:
-        rho = 1e-3
-        max_iter = 30
+        rho = rho_base
+        max_iter = max_iter_base
 
     if A_fn is None or At_fn is None:
         x_template = torch.zeros(
