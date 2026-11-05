@@ -444,7 +444,10 @@ class Diffusion(object):
                             gamma_t = 0.
 
                         # Eq. 17
-                        x0_t_hat = x0_t - lambda_t * Ap(y=A(x0_t) - y, current_t=i)
+                        if i > 40:
+                            x0_t_hat = x0_t - lambda_t * Ap(y=A(x0_t) - y, current_t=i)
+                        else:
+                            x0_t_hat = x0_t
 
                         eta = self.args.eta
 

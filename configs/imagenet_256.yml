@@ -7,7 +7,7 @@ ddnm:
 
     cg_rtol: 1e-3
     cg_rho_min: 1e-4
-    cg_rho_max: 0.015
+    cg_rho_max: 1e-2
     cg_max_iter: 30
 
 data:
@@ -54,6 +54,6 @@ sampling:
     batch_size: 1
     
 time_travel:
-    T_sampling: 100
+    T_sampling: 250
     travel_length: 1
     travel_repeat: 2
