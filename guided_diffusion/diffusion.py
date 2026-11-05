@@ -94,9 +94,9 @@ def apply_A(x, config):
     return patches
 
 
-def cg(A_op, b, rtol, max_iter, x_init=None):
-    x = x_init.clone() if x_init is not None else torch.zeros_like(b)
-    r = b - A_op(x) if x_init is not None else b.clone()
+def cg(A_op, b, rtol, max_iter):
+    x = torch.zeros_like(b)
+    r = b.clone()
     p = r.clone()
 
     rsold = torch.sum(r * r)
@@ -142,7 +142,7 @@ def make_A_At(config, x_template):
 A_fn, At_fn = None, None
 
 
-def apply_Ap_cg(y, x0_t, current_t, config):
+def apply_Ap_cg(y, current_t, config):
     global A_fn, At_fn
 
     b, c, h, w = y.shape
@@ -166,16 +166,11 @@ def apply_Ap_cg(y, x0_t, current_t, config):
 
     with torch.no_grad():
         At_y = At_fn(y)
-        if x0_t is not None:
-            b_cg = At_y + rho * x0_t
-            x_init = x0_t
-        else:
-            b_cg = At_y
-            x_init = None
+        b = At_y
 
         AtA_rho_fn = lambda x: At_fn(A_fn(x)) + rho * x
 
-        return cg(AtA_rho_fn, b_cg, rtol=rtol, max_iter=max_iter, x_init=x_init)
+        return cg(AtA_rho_fn, b, rtol=rtol, max_iter=max_iter)
 
 
 class Diffusion(object):
@@ -343,7 +338,7 @@ class Diffusion(object):
         print("args.deg:", args.deg)
         if args.deg == 'diy_cg':
             A = lambda x: apply_A(x, config)
-            Ap = lambda y, x0_t=None, current_t=1000: apply_Ap_cg(y, x0_t, current_t, config)
+            Ap = lambda y, current_t=1000: apply_Ap_cg(y=y, current_t=current_t, config=config)
         else:
             raise NotImplementedError("degradation type not supported")
 
@@ -429,6 +424,7 @@ class Diffusion(object):
                         next_t = (torch.ones(n) * j).to(x.device)
                         at = compute_alpha(self.betas, t.long())
                         at_next = compute_alpha(self.betas, next_t.long())
+                        sigma_t = (1 - at_next).sqrt()
                         xt = xs[-1].to('cuda')
 
                         et = model(xt, t)
@@ -439,16 +435,24 @@ class Diffusion(object):
                         # Eq. 12
                         x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
 
-                        if i < 20:
-                            x0_t_hat = x0_t
+                        # Eq. 19
+                        if sigma_t >= at_next * sigma_y:
+                            lambda_t = 1.
+                            gamma_t = (sigma_t ** 2 - (at_next * sigma_y) ** 2).sqrt()
                         else:
-                            x0_t_hat = Ap(y, x0_t, i)
+                            lambda_t = sigma_t / (at_next * sigma_y)
+                            gamma_t = 0.
 
-                        eta = self.args.eta if hasattr(self.args, 'eta') else 1.0
-                        c1 = eta * (1 - at_next).sqrt()
-                        c2 = ((1 - eta ** 2) * (1 - at_next)).sqrt()
+                        # Eq. 17
+                        x0_t_hat = x0_t - lambda_t * Ap(y=A(x0_t) - y, current_t=i)
 
-                        xt_next = at_next.sqrt() * x0_t_hat + c1 * torch.randn_like(x0_t) + c2 * et
+                        eta = self.args.eta
+
+                        c1 = (1 - at_next).sqrt() * eta
+                        c2 = (1 - at_next).sqrt() * ((1 - eta ** 2) ** 0.5)
+
+                        # different from the paper, we use DDIM here instead of DDPM
+                        xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (c1 * torch.randn_like(x0_t) + c2 * et)
 
                         x0_preds.append(x0_t.to('cpu'))
                         xs.append(xt_next.to('cpu'))
@@ -487,7 +491,6 @@ class Diffusion(object):
             tvu.save_image(
                 x[0], os.path.join(self.args.image_folder, f"{idx_so_far}/ddnm.png")
             )
-
 
             orig = inverse_data_transform(config, x_orig[0])[:, 4:252, 4:252].unsqueeze(0).to(self.device)
             reconstructed = x[0][:, 4:252, 4:252].unsqueeze(0).to(self.device)
