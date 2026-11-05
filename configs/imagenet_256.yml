@@ -7,7 +7,7 @@ ddnm:
 
     cg_rtol: 1e-3
     cg_rho_min: 1e-4
-    cg_rho_max: 1e-2
+    cg_rho_max: 0.02
     cg_max_iter: 30
 
 data:
