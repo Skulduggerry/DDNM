@@ -6,6 +6,7 @@ import torch
 import torch.utils.data as data
 import torchvision
 import torchvision.utils as tvu
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 import tqdm
 
 from datasets import get_dataset, data_transform, inverse_data_transform
@@ -17,6 +18,7 @@ from guided_diffusion.script_util import create_model, create_classifier, classi
 
 def get_gaussian_noisy_img(img, noise_level):
     return img + torch.randn_like(img).cuda() * noise_level
+
 
 def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_timesteps):
     def sigmoid(x):
@@ -92,9 +94,9 @@ def apply_A(x, config):
     return patches
 
 
-def cg(A_op, b, rtol, max_iter):
-    x = torch.zeros_like(b)
-    r = b.clone()
+def cg(A_op, b, rtol, max_iter, x_init=None):
+    x = x_init.clone() if x_init is not None else torch.zeros_like(b)
+    r = b - A_op(x) if x_init is not None else b.clone()
     p = r.clone()
 
     rsold = torch.sum(r * r)
@@ -102,14 +104,12 @@ def cg(A_op, b, rtol, max_iter):
 
     for i in range(max_iter):
         Ap = A_op(p)
-
         denom = torch.sum(p * Ap)
 
         if not torch.isfinite(denom) or denom <= 1e-20:
             break
 
         alpha = rsold / denom
-
         x = x + alpha * p
         r = r - alpha * Ap
 
@@ -117,7 +117,6 @@ def cg(A_op, b, rtol, max_iter):
             break
 
         rsnew = torch.sum(r * r)
-
         if not torch.isfinite(rsnew):
             break
 
@@ -130,7 +129,6 @@ def cg(A_op, b, rtol, max_iter):
 def make_A_At(config, x_template):
     A_fn = lambda x: apply_A(x, config)
 
-    # Construct the VJP while gradient tracking is enabled.
     with torch.enable_grad():
         _, vjp_fn = torch.func.vjp(A_fn, x_template)
 
@@ -144,26 +142,19 @@ def make_A_At(config, x_template):
 A_fn, At_fn = None, None
 
 
-def apply_Ap_cg(y, config, current_t):
+def apply_Ap_cg(y, x0_t, current_t, config):
     global A_fn, At_fn
 
     b, c, h, w = y.shape
     assert h == w
 
     rtol = float(config.ddnm.cg_rtol)
-    rho_base = float(config.ddnm.cg_rho_base)
-    rho_progressive = float(config.ddnm.cg_rho_progressive)
-    max_iter_base = int(config.ddnm.cg_max_iter_base)
-    max_iter_progressive = int(config.ddnm.cg_max_iter_progressive)
-    critical_window = int(config.ddnm.cg_critical_window)
+    rho_min = float(config.ddnm.cg_rho_min)
+    rho_max = float(config.ddnm.cg_rho_max)
+    max_iter = int(config.ddnm.cg_max_iter)
 
-    if current_t < critical_window:
-        progress = (critical_window - current_t) / critical_window
-        rho = rho_base + progress * (rho_progressive - rho_base)
-        max_iter = max(max_iter_progressive, int(max_iter_base - progress * (max_iter_base - max_iter_progressive)))
-    else:
-        rho = rho_base
-        max_iter = max_iter_base
+    progress = (1000 - current_t) / 1000
+    rho = rho_min + progress * (rho_max - rho_min)
 
     if A_fn is None or At_fn is None:
         x_template = torch.zeros(
@@ -175,8 +166,16 @@ def apply_Ap_cg(y, config, current_t):
 
     with torch.no_grad():
         At_y = At_fn(y)
-        AtA_fn = lambda x: At_fn(A_fn(x)) + rho * x
-        return cg(AtA_fn, At_y, rtol=rtol, max_iter=max_iter)
+        if x0_t is not None:
+            b_cg = At_y + rho * x0_t
+            x_init = x0_t
+        else:
+            b_cg = At_y
+            x_init = None
+
+        AtA_rho_fn = lambda x: At_fn(A_fn(x)) + rho * x
+
+        return cg(AtA_rho_fn, b_cg, rtol=rtol, max_iter=max_iter, x_init=x_init)
 
 
 class Diffusion(object):
@@ -344,7 +343,7 @@ class Diffusion(object):
         print("args.deg:", args.deg)
         if args.deg == 'diy_cg':
             A = lambda x: apply_A(x, config)
-            Ap = lambda y, t: apply_Ap_cg(y, config, t)
+            Ap = lambda y, x0_t=None, current_t=1000: apply_Ap_cg(y, x0_t, current_t, config)
         else:
             raise NotImplementedError("degradation type not supported")
 
@@ -356,8 +355,8 @@ class Diffusion(object):
         idx_so_far = args.subset_start
         avg_mse = 0.0
         avg_psnr = 0.0
+        avg_lpips = 0.0
         avg_norm_error = 0.0
-        avg_norm_error_orig_Ap_A_y = 0.0
         pbar = tqdm.tqdm(val_loader)
 
         for x_orig, classes in pbar:
@@ -373,7 +372,7 @@ class Diffusion(object):
             if config.sampling.batch_size != 1:
                 raise ValueError("please change the config file to set batch size as 1")
 
-            Apy = Ap(y, 1000)
+            Apy = Ap(y)
 
             # validate the pseudo inverse with high precision
             # ApAApy = Ap(A(Apy))
@@ -440,27 +439,38 @@ class Diffusion(object):
                         # Eq. 12
                         x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
 
-                        # Eq. 19
-                        at_next_sqrt = at_next.sqrt()
-                        sigma_t = (1 - at_next).sqrt()
-
-                        if sigma_t >= at_next_sqrt * sigma_y:
-                            lambda_t = 1.
-                            gamma_t = (sigma_t ** 2 - (at_next_sqrt * sigma_y) ** 2).clamp_min(1e-6).sqrt()
+                        if i < 20:
+                            x0_t_hat = x0_t
                         else:
-                            lambda_t = sigma_t / (at_next_sqrt * sigma_y).clamp_min(1e-8)
-                            gamma_t = 0.
+                            x0_t_hat = Ap(y, x0_t, i)
 
-                        # Eq. 17
-                        x0_t_hat = x0_t - lambda_t * Ap(A(x0_t) - y, i)
+                        eta = self.args.eta if hasattr(self.args, 'eta') else 1.0
+                        c1 = eta * (1 - at_next).sqrt()
+                        c2 = ((1 - eta ** 2) * (1 - at_next)).sqrt()
 
-                        coeff_et = (sigma_t ** 2 - gamma_t ** 2).clamp_min(0.).sqrt()
-                        coeff_eps = gamma_t
-
-                        xt_next = at_next_sqrt * x0_t_hat + coeff_et * et + coeff_eps * torch.randn_like(x0_t)
+                        xt_next = at_next.sqrt() * x0_t_hat + c1 * torch.randn_like(x0_t) + c2 * et
 
                         x0_preds.append(x0_t.to('cpu'))
                         xs.append(xt_next.to('cpu'))
+
+                        if i % 100 == 0:
+                            os.makedirs(f"{self.args.image_folder}/debug_ddnm/x0_t/", exist_ok=True)
+                            tvu.save_image(
+                                inverse_data_transform(config, x0_t[0]),
+                                f"{self.args.image_folder}/debug_ddnm/x0_t/x0_t_{i:04d}.png"
+                            )
+
+                            os.makedirs(f"{self.args.image_folder}/debug_ddnm/x0_t_hat/", exist_ok=True)
+                            tvu.save_image(
+                                inverse_data_transform(config, x0_t_hat[0]),
+                                f"{self.args.image_folder}/debug_ddnm/x0_t_hat/x0_t_hat_{i:04d}.png"
+                            )
+
+                            os.makedirs(f"{self.args.image_folder}/debug_ddnm/xt_next/", exist_ok=True)
+                            tvu.save_image(
+                                inverse_data_transform(config, xt_next[0]),
+                                f"{self.args.image_folder}/debug_ddnm/xt_next/xt_next_{i:04d}.png"
+                            )
                     else:  # time-travel back
                         next_t = (torch.ones(n) * j).to(x.device)
                         at_next = compute_alpha(self.betas, next_t.long())
@@ -472,38 +482,35 @@ class Diffusion(object):
 
                 x = xs[-1]
 
-            print("#### Final Output ####")
-            print("isfinite:", x[0].isfinite().all().item())
-            print("max:", x[0].max())
-            print("min:", x[0].min())
-            print("nan:", x[0].isnan().all().item())
-            print("##############")
-
             x = [inverse_data_transform(config, xi) for xi in x]
 
             tvu.save_image(
                 x[0], os.path.join(self.args.image_folder, f"{idx_so_far}/ddnm.png")
             )
 
-            orig = inverse_data_transform(config, x_orig[0])
-            diff = x[0].to(self.device) - orig
+
+            orig = inverse_data_transform(config, x_orig[0])[:, 4:252, 4:252].unsqueeze(0).to(self.device)
+            reconstructed = x[0][:, 4:252, 4:252].unsqueeze(0).to(self.device)
+            diff = reconstructed - orig
 
             mse = torch.mean(diff ** 2)
             avg_mse += mse
             psnr = 10 * torch.log10(1 / mse)
             avg_psnr += psnr
 
+            lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='alex').to(self.device)
+            lpips = lpips_metric(orig, reconstructed)
+            avg_lpips += lpips
+
             norm_error = torch.norm(diff) / torch.norm(orig)
             avg_norm_error += norm_error
-            norm_error_orig_Ap_A_y = torch.norm(inverse_data_transform(config, Apy[0]) - orig) / torch.norm(orig)
-            avg_norm_error_orig_Ap_A_y += norm_error_orig_Ap_A_y
 
             with open(os.path.join(self.args.image_folder, f"{idx_so_far}/errors.txt"), mode='w') as f:
                 f.write(f"""
                     MSE={mse}
                     PSNR={psnr}
+                    LPIPS={lpips}
                     Norm Error={norm_error}
-                    Norm Error Ap(A(y))={norm_error_orig_Ap_A_y}
                 """)
             idx_so_far += y.shape[0]
 
@@ -512,18 +519,19 @@ class Diffusion(object):
 
         avg_mse /= (idx_so_far - idx_init)
         avg_psnr /= (idx_so_far - idx_init)
+        avg_lpips /= (idx_so_far - idx_init)
         avg_norm_error /= (idx_so_far - idx_init)
-        avg_norm_error_orig_Ap_A_y /= (idx_so_far - idx_init)
 
         with open(os.path.join(self.args.image_folder, f"errors.txt"), mode='w') as f:
             f.write(f"""
                 Total Average MSE={avg_mse}
                 Total Average PSNR={avg_psnr}
+                Total Average LPIPS={avg_lpips}
                 Total Average Norm Error={avg_norm_error}
-                Total Average Norm Error Ap(A(y))={avg_norm_error_orig_Ap_A_y}
             """)
 
         print("Total Average PSNR: %.2f" % avg_psnr)
+        print("Total Average LPIPS: %.2f" % avg_lpips)
         print("Number of samples: %d" % (idx_so_far - idx_init))
 
     def svd_based_ddnm_plus(self, model, cls_fn):
