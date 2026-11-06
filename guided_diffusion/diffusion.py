@@ -9,6 +9,8 @@ import torchvision.utils as tvu
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 import tqdm
 
+from deeplens import GeoLens
+
 from datasets import get_dataset, data_transform, inverse_data_transform
 from functions.ckpt_util import get_ckpt_path, download
 from functions.svd_ddnm import ddnm_diffusion, ddnm_plus_diffusion
@@ -53,6 +55,29 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
     return betas
 
 
+lens = GeoLens(
+    filename="./lenses/cellphone80deg.json",
+    device='cuda' if torch.cuda.is_available() else 'cpu')
+
+point = torch.tensor(
+    [0.0, 0.0, -10000.0],
+    device='cuda' if torch.cuda.is_available() else 'cpu',
+    dtype=torch.float32,
+)
+
+print(torch.cuda.is_available())
+
+psf_rgb = lens.psf_rgb(
+    points=point,
+    ks=33,
+    spp=16384,
+    model="geometric",
+)
+
+print(psf_rgb.shape)
+assert False
+
+
 def apply_A(x, config):
     # =========================
     # FELIX'S CODE
@@ -78,6 +103,7 @@ def apply_A(x, config):
     # ==================
     # optical aberration
     # ==================
+    test()
     patches = torchvision.transforms.functional.gaussian_blur(patches, (blur_ksize, blur_ksize), sigma=blur_strength)
 
     # ============
