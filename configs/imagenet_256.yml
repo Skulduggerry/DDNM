@@ -6,6 +6,7 @@ ddnm:
     repeat_cnt: 4
     shift: 1
     blur_ksize: 15
+    vignette_falloff: 0.01
 
     cg_rtol: 1e-3
     cg_rho_min: 1e-4
