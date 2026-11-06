@@ -55,4 +55,4 @@ sampling:
 time_travel:
     T_sampling: 250
     travel_length: 1
-    travel_repeat: 3
+    travel_repeat: 2
