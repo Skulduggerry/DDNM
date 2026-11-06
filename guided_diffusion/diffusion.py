@@ -117,9 +117,6 @@ def generate_tombo_psfs(
 
 psfs = None
 
-import torch
-import torch.nn.functional as F
-
 
 def apply_A(x, config):
     repeat_cnt = config.ddnm.repeat_cnt
