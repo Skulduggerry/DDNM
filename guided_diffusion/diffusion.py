@@ -55,63 +55,178 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
     return betas
 
 
-lens = GeoLens(
-    filename="./lenses/cellphone80deg.json",
-    device='cuda' if torch.cuda.is_available() else 'cpu')
-
-point = torch.tensor(
-    [0.0, 0.0, -10000.0],
-    device='cuda' if torch.cuda.is_available() else 'cpu',
-    dtype=torch.float32,
-)
-
-print(torch.cuda.is_available())
-
-psf_rgb = lens.psf_rgb(
-    points=point,
-    ks=33,
-    spp=16384,
-    model="geometric",
-)
-
-print(psf_rgb.shape)
-assert False
+import torch
+from deeplens import GeoLens
 
 
-def apply_A(x, config):
-    # =========================
-    # FELIX'S CODE
-    # =========================
+def generate_tombo_psfs(
+        lens_file,
+        field_points,
+        channels=1,
+        kernel_size=15,
+        model="geometric",
+        spp=16384,
+        device="cuda",
+):
+    assert kernel_size % 2 == 1
+
+    lens = GeoLens(
+        filename=lens_file,
+        device=device,
+        dtype=torch.float64,
+    )
+
+    wavelengths = {
+        1: [0.588],
+        3: [0.656, 0.588, 0.486],
+    }
+
+    wavelengths = wavelengths[channels]
+
+    psfs = []
+
+    with torch.no_grad():
+
+        for point in field_points:
+
+            unit_psfs = []
+
+            for wavelength in wavelengths:
+                psf = lens.psf(
+                    points=point.to(
+                        device=device,
+                        dtype=torch.float64,
+                    ),
+                    ks=kernel_size,
+                    wvln=wavelength,
+                    model=model,
+                    spp=spp,
+                    recenter=True,
+                )
+
+                # Ensure a valid normalized intensity kernel.
+                psf = psf.clamp_min(0.0)
+                psf = psf / psf.sum().clamp_min(1e-12)
+
+                unit_psfs.append(psf)
+
+            psfs.append(torch.stack(unit_psfs))
+
+    return torch.stack(psfs).float()
+
+
+psfs = None
+
+import torch
+import torch.nn.functional as F
+
+
+def apply_A(x, config, psfs, eta):
     repeat_cnt = config.ddnm.repeat_cnt
     shift = config.ddnm.shift
-    blur_ksize = config.ddnm.blur_ksize
-    blur_strength = config.ddnm.blur_strength
     out_size = config.ddnm.output_size
 
-    # =====
-    # Shift
-    # =====
     b, c, h, w = x.shape
     assert h == w
+
     size = w - (repeat_cnt - 1) * shift
+    num_units = repeat_cnt ** 2
+
+    if psfs is None:
+        field_points = torch.tensor(
+            [
+                [0.0, 0.0, -10000.0]
+                for _ in range(num_units)
+            ],
+            dtype=torch.float64,
+            device="cuda",
+        )
+
+        psfs = generate_tombo_psfs(
+            lens_file="unit_lens.zmx",
+            field_points=field_points,
+            channels=config.data.channels,
+            kernel_size=15,
+            model="geometric",
+            spp=16384,
+            device="cuda",
+        )
+
+    # =========================
+    # Extract TOMBO sub-images
+    # =========================
     patches = x.unfold(2, size, shift).unfold(3, size, shift)
 
-    # permute + reshape: (b, c, repeat_cnt, repeat_cnt, size, size) -> (b * repeat_cnt ** 2, c, size, size)
-    B_lenses = b * repeat_cnt ** 2
-    patches = patches.permute(0, 2, 3, 1, 4, 5).contiguous().reshape(B_lenses, c, size, size)
+    patches = (
+        patches
+        .permute(0, 2, 3, 1, 4, 5)
+        .contiguous()
+        .reshape(b * num_units, c, size, size)
+    )
 
-    # ==================
-    # optical aberration
-    # ==================
-    test()
-    patches = torchvision.transforms.functional.gaussian_blur(patches, (blur_ksize, blur_ksize), sigma=blur_strength)
+    # =========================
+    # Optical aberration
+    # =========================
+    patches = patches.reshape(b, num_units, c, size, size)
 
-    # ============
-    # downsampling
-    # ============
+    assert psfs.shape[0] == num_units
+    assert psfs.shape[1] == c
+    assert psfs.shape[-1] == psfs.shape[-2]
+
+    kernel_size = psfs.shape[-1]
+    padding = kernel_size // 2
+
+    assert kernel_size % 2 == 1
+    assert size > padding
+
+    weights = (
+        psfs.to(device=x.device, dtype=x.dtype)
+        .unsqueeze(0)
+        .expand(b, -1, -1, -1, -1)
+        .reshape(b * num_units * c, 1, kernel_size, kernel_size)
+    )
+
+    # Reshape all patches into independent channels.
+    optical_input = patches.reshape(
+        1, b * num_units * c, size, size
+    )
+
+    # Boundary handling: reflection padding.
+    optical_input = F.pad(
+        optical_input,
+        (padding, padding, padding, padding),
+        mode="reflect",
+    )
+
+    # Apply the unit-specific optical PSFs.
+    # Groups ensure that no lens unit mixes with another.
+
+    optical_output = torch.nn.functional.conv2d(
+        optical_input,
+        weights.flip((-2, -1)),
+        groups=b * num_units * c,
+    )
+
+    # Restore original layout.
+    patches = optical_output.reshape(
+        b, num_units, c, size, size
+    )
+
+    # =========================
+    # Downsampling
+    # =========================
+
+    patches = patches.reshape(
+        b * num_units, c, size, size
+    )
+
     lens_out_size = out_size // repeat_cnt
     assert lens_out_size * repeat_cnt == out_size
-    patches = torch.nn.functional.adaptive_avg_pool2d(patches, (lens_out_size, lens_out_size))
+
+    patches = torch.nn.functional.adaptive_avg_pool2d(
+        patches,
+        (lens_out_size, lens_out_size),
+    )
 
     # reshape + permute: (b * repeat_cnt ** 2, c, size, size) -> (b, c, out_size, out_size)
     patches = patches.reshape(b, repeat_cnt, repeat_cnt, c, lens_out_size, lens_out_size).permute(0, 3, 1, 4, 2, 5)
