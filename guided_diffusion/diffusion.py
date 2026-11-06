@@ -52,39 +52,6 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
     assert betas.shape == (num_diffusion_timesteps,)
     return betas
 
-def get_vignetting_mask(size, falloff, device, dtype):
-    y = torch.linspace(-1, 1, size, device=device, dtype=dtype)
-    x = torch.linspace(-1, 1, size, device=device, dtype=dtype)
-    Y, X = torch.meshgrid(y, x, indexing='ij')
-
-    R2 = (X ** 2 + Y ** 2)
-    R2 = R2 / R2.max()
-
-    mask = 1.0 - (falloff * R2)
-    return mask.clamp_min(0.0).view(1, 1, 1, size, size)
-
-
-def get_tombo_psfs(num_lenses, ksize, device, dtype):
-    psfs = torch.zeros((num_lenses, 1, ksize, ksize), device=device, dtype=dtype)
-
-    # Synthetic generation: slightly shift and deform a Gaussian per lens
-    y = torch.linspace(-1, 1, ksize, device=device, dtype=dtype)
-    x = torch.linspace(-1, 1, ksize, device=device, dtype=dtype)
-    Y, X = torch.meshgrid(y, x, indexing='ij')
-
-    for i in range(num_lenses):
-        # Simulate slight manufacturing/alignment flaws per lens
-        shift_x = (torch.rand(1, device=device) - 0.5) * 0.2
-        shift_y = (torch.rand(1, device=device) - 0.5) * 0.2
-        R2 = (X - shift_x) ** 2 + (Y - shift_y) ** 2
-
-        sigma = 0.5 + (i * 0.01)  # Slight variance in focus
-        kernel = torch.exp(-R2 / (2 * sigma ** 2))
-        kernel = kernel / kernel.sum()  # Normalize energy to 1.0 so image doesn't darken
-
-        psfs[i, 0] = kernel
-
-    return psfs
 
 def apply_A(x, config):
     # =========================
@@ -92,8 +59,8 @@ def apply_A(x, config):
     # =========================
     repeat_cnt = config.ddnm.repeat_cnt
     shift = config.ddnm.shift
-    vignette_falloff = config.ddnm.vignette_falloff
     blur_ksize = config.ddnm.blur_ksize
+    blur_strength = config.ddnm.blur_strength
     out_size = config.ddnm.output_size
 
     # =====
@@ -111,15 +78,7 @@ def apply_A(x, config):
     # ==================
     # optical aberration
     # ==================
-    vignetting_mask = get_vignetting_mask(size, vignette_falloff, x.device, x.dtype)
-    patches = patches * vignetting_mask
-
-    psf_kernels = get_tombo_psfs(repeat_cnt ** 2, blur_ksize, x.device, x.dtype)
-    patches = patches.reshape(b, repeat_cnt ** 2 * c, size, size)
-    ksize = psf_kernels.size(-1)
-    weight = psf_kernels.repeat_interleave(c, dim=0)
-    patches = torch.nn.functional.conv2d(patches, weight, groups=repeat_cnt ** 2 * c, padding=ksize // 2)
-    patches = patches.reshape(b * repeat_cnt ** 2, c, size, size)
+    patches = torchvision.transforms.functional.gaussian_blur(patches, (blur_ksize, blur_ksize), sigma=blur_strength)
 
     # ============
     # downsampling
@@ -136,9 +95,6 @@ def apply_A(x, config):
 
 
 def cg(A_op, b, rtol, max_iter):
-    # =========================
-    # FELIX'S CODE
-    # =========================
     x = torch.zeros_like(b)
     r = b.clone()
     p = r.clone()
@@ -171,9 +127,6 @@ def cg(A_op, b, rtol, max_iter):
 
 
 def make_A_At(config, x_template):
-    # =========================
-    # FELIX'S CODE
-    # =========================
     A_fn = lambda x: apply_A(x, config)
 
     with torch.enable_grad():
@@ -190,9 +143,6 @@ A_fn, At_fn = None, None
 
 
 def apply_Ap_cg(y, current_t, config):
-    # =========================
-    # FELIX'S CODE
-    # =========================
     global A_fn, At_fn
 
     b, c, h, w = y.shape
