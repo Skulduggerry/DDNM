@@ -121,7 +121,7 @@ import torch
 import torch.nn.functional as F
 
 
-def apply_A(x, config, psfs, eta):
+def apply_A(x, config):
     repeat_cnt = config.ddnm.repeat_cnt
     shift = config.ddnm.shift
     out_size = config.ddnm.output_size
