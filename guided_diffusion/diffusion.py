@@ -132,6 +132,7 @@ def apply_A(x, config):
     size = w - (repeat_cnt - 1) * shift
     num_units = repeat_cnt ** 2
 
+    global psfs
     if psfs is None:
         field_points = torch.tensor(
             [
