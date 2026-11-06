@@ -141,7 +141,7 @@ def apply_A(x, config):
         )
 
         psfs = generate_tombo_psfs(
-            lens_file="unit_lens.zmx",
+            lens_file="./lenses/cellphone80deg.json",
             field_points=field_points,
             channels=config.data.channels,
             kernel_size=15,
