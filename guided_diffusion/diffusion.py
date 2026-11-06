@@ -4,12 +4,10 @@ import random
 import numpy as np
 import torch
 import torch.utils.data as data
-import torchvision
 import torchvision.utils as tvu
-from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 import tqdm
-
 from deeplens import GeoLens
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 from datasets import get_dataset, data_transform, inverse_data_transform
 from functions.ckpt_util import get_ckpt_path, download
@@ -53,10 +51,6 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
         raise NotImplementedError(beta_schedule)
     assert betas.shape == (num_diffusion_timesteps,)
     return betas
-
-
-import torch
-from deeplens import GeoLens
 
 
 def generate_tombo_psfs(
@@ -121,6 +115,7 @@ psfs = None
 def apply_A(x, config):
     repeat_cnt = config.ddnm.repeat_cnt
     shift = config.ddnm.shift
+    ksize = config.ddnm.kernel_size
     out_size = config.ddnm.output_size
 
     b, c, h, w = x.shape
@@ -144,7 +139,7 @@ def apply_A(x, config):
             lens_file="./lenses/cellphone80deg.json",
             field_points=field_points,
             channels=config.data.channels,
-            kernel_size=15,
+            kernel_size=ksize,
             model="geometric",
             spp=16384,
             device="cuda",
@@ -487,11 +482,17 @@ class Diffusion(object):
         print(f'Start from {args.subset_start}')
         idx_init = args.subset_start
         idx_so_far = args.subset_start
+        pbar = tqdm.tqdm(val_loader)
+
         avg_mse = 0.0
         avg_psnr = 0.0
         avg_lpips = 0.0
         avg_norm_error = 0.0
-        pbar = tqdm.tqdm(val_loader)
+
+        avg_mse_Apy = 0.0
+        avg_psnr_Apy = 0.0
+        avg_lpips_Apy = 0.0
+        avg_norm_error_Apy = 0.0
 
         for x_orig, classes in pbar:
             # make x_orig a 64 bit float for higher to validate
@@ -634,28 +635,45 @@ class Diffusion(object):
             reconstructed = x[0][:, 4:252, 4:252].unsqueeze(0).to(self.device)
             diff = reconstructed - orig
 
-            mse = torch.mean(diff ** 2)
-            avg_mse += mse
-            psnr = 10 * torch.log10(1 / mse)
-            avg_psnr += psnr
+            Apy = inverse_data_transform(config, Apy[0])[:, 4:252, 4:252].unsqueeze(0).to(self.device)
+            diff_Apy = Apy - orig
 
             lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='alex').to(self.device)
-            lpips = lpips_metric(orig, reconstructed)
-            avg_lpips += lpips
 
+            mse = torch.mean(diff ** 2)
+            psnr = 10 * torch.log10(1 / mse)
+            lpips = lpips_metric(orig, reconstructed)
             norm_error = torch.norm(diff) / torch.norm(orig)
+            avg_mse += mse
+            avg_psnr += psnr
+            avg_lpips += lpips
             avg_norm_error += norm_error
+
+            mse_Apy = torch.mean(diff_Apy ** 2)
+            psnr_Apy = 10 * torch.log10(1 / mse_Apy)
+            lpips_Apy = lpips_metric(orig, Apy)
+            norm_error_Apy = torch.norm(diff_Apy) / torch.norm(orig)
+            avg_mse_Apy += mse_Apy
+            avg_psnr_Apy += psnr_Apy
+            avg_lpips_Apy += lpips_Apy
+            avg_norm_error_Apy += norm_error_Apy
 
             with open(os.path.join(self.args.image_folder, f"{idx_so_far}/errors.txt"), mode='w') as f:
                 f.write(f"""
+                    Reconstructed:
                     MSE={mse}
                     PSNR={psnr}
                     LPIPS={lpips}
                     Norm Error={norm_error}
+                    
+                    Apy:
+                    MSE={mse_Apy}
+                    PSNR={psnr_Apy}
+                    LPIPS={lpips_Apy}
+                    Norm Error={norm_error_Apy}
                 """)
             idx_so_far += y.shape[0]
 
-            print("MSE: %f" % mse)
             pbar.set_description("PSNR: %.2f" % (avg_psnr / (idx_so_far - idx_init)))
 
         avg_mse /= (idx_so_far - idx_init)
@@ -663,12 +681,24 @@ class Diffusion(object):
         avg_lpips /= (idx_so_far - idx_init)
         avg_norm_error /= (idx_so_far - idx_init)
 
+        avg_mse_Apy /= (idx_so_far - idx_init)
+        avg_psnr_Apy /= (idx_so_far - idx_init)
+        avg_lpips_Apy /= (idx_so_far - idx_init)
+        avg_norm_error_Apy /= (idx_so_far - idx_init)
+
         with open(os.path.join(self.args.image_folder, f"errors.txt"), mode='w') as f:
             f.write(f"""
+                Reconstructed:
                 Total Average MSE={avg_mse}
                 Total Average PSNR={avg_psnr}
                 Total Average LPIPS={avg_lpips}
                 Total Average Norm Error={avg_norm_error}
+                
+                Apy:
+                Total Average MSE={avg_mse_Apy}
+                Total Average PSNR={avg_psnr_Apy}
+                Total Average LPIPS={avg_lpips_Apy}
+                Total Average Norm Error={avg_norm_error_Apy}
             """)
 
         print("Total Average PSNR: %.2f" % avg_psnr)
