@@ -190,7 +190,7 @@ def apply_A(x, config):
     )
 
     # Boundary handling: reflection padding.
-    optical_input = F.pad(
+    optical_input = torch.nn.functional.pad(
         optical_input,
         (padding, padding, padding, padding),
         mode="reflect",
