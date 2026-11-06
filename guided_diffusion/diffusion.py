@@ -276,7 +276,7 @@ def make_A_At(config, x_template):
 A_fn, At_fn = None, None
 
 
-def apply_Ap_cg(y, current_t, config):
+def apply_Ap_cg(y, current_t, config, has_noise):
     global A_fn, At_fn
 
     b, c, h, w = y.shape
@@ -288,7 +288,7 @@ def apply_Ap_cg(y, current_t, config):
     max_iter = int(config.ddnm.cg_max_iter)
 
     progress = (1000 - current_t) / 1000
-    rho = rho_min + progress * (rho_max - rho_min)
+    rho = rho_min + progress * (rho_max - rho_min) if has_noise else 0
 
     if A_fn is None or At_fn is None:
         x_template = torch.zeros(
@@ -472,7 +472,7 @@ class Diffusion(object):
         print("args.deg:", args.deg)
         if args.deg == 'diy_cg':
             A = lambda x: apply_A(x, config)
-            Ap = lambda y, current_t=1000: apply_Ap_cg(y=y, current_t=current_t, config=config)
+            Ap = lambda y, current_t=1000: apply_Ap_cg(y=y, current_t=current_t, config=config, has_noise=self.args.add_noise)
         else:
             raise NotImplementedError("degradation type not supported")
 
