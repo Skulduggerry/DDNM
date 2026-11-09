@@ -4,7 +4,7 @@ ddnm:
     shift: 1
     kernel_size: 15
 
-    cg_rtol: 1e-4
+    cg_rtol: 1e-5
     cg_rho_min: 1e-4
     cg_rho_max: 2e-2
     cg_max_iter: 30
