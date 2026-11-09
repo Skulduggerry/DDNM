@@ -615,7 +615,7 @@ class Diffusion(object):
                         at_next = compute_alpha(self.betas, next_t.long())
                         x0_t = x0_preds[-1].to('cuda')
 
-                        xt_next = at_next * x0_t + torch.randn_like(x0_t) * (1 - at_next)
+                        xt_next = at_next.sqrt() * x0_t + torch.randn_like(x0_t) * (1 - at_next).sqrt()
 
                         xs.append(xt_next.to('cpu'))
 
