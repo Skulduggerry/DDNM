@@ -579,9 +579,9 @@ class Diffusion(object):
                         sigma_t = (1 - at_next).sqrt()
                         if sigma_t >= at_next * sigma_y:
                             lambda_t = 1.
-                            gamma_t = (sigma_t ** 2 - at_next * sigma_y ** 2).sqrt()
+                            gamma_t = sigma_t**2 - (at_next*sigma_y)**2
                         else:
-                            lambda_t = sigma_t / (at_next.sqrt() * sigma_y)
+                            lambda_t = sigma_t / (at_next * sigma_y)
                             gamma_t = 0.
 
                         # Eq. 17
