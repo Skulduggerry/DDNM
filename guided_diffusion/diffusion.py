@@ -586,7 +586,7 @@ class Diffusion(object):
                         # Eq. 17
                         x0_t_hat = x0_t - lambda_t * Ap(y=A(x0_t) - y, current_t=i)
                         xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (
-                                    eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
+                                    self.args.eta * torch.randn_like(x0_t) + (1 - self.args.eta ** 2) ** 0.5 * et)
 
                         x0_preds.append(x0_t.to('cpu'))
                         xs.append(xt_next.to('cpu'))
