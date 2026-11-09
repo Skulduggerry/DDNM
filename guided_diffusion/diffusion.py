@@ -575,17 +575,17 @@ class Diffusion(object):
                         x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
 
                         # Eq. 19
-                        s = (1 - at_next).sqrt()
-                        if s >= at_next.sqrt() * sigma_y:
+                        sigma_t = (1 - at_next).sqrt()
+                        if sigma_t >= at_next * sigma_y:
                             lambda_t = 1.
-                            gamma_t = (s ** 2 - at_next * sigma_y ** 2).sqrt()
+                            gamma_t = sigma_t ** 2 - (at_next * sigma_y) ** 2
                         else:
-                            lambda_t = s / (at_next.sqrt() * sigma_y)
+                            lambda_t = sigma_t / (at_next * sigma_y)
                             gamma_t = 0.
 
                         # Eq. 17
                         x0_t_hat = x0_t - lambda_t * Ap(y=A(x0_t) - y, current_t=i)
-                        xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (
+                        xt_next = at_next * x0_t_hat + gamma_t * (
                                     self.args.eta * torch.randn_like(x0_t) + (1 - self.args.eta ** 2) ** 0.5 * et)
 
                         x0_preds.append(x0_t.to('cpu'))
