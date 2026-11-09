@@ -564,7 +564,6 @@ class Diffusion(object):
                         next_t = (torch.ones(n) * j).to(x.device)
                         at = compute_alpha(self.betas, t.long())
                         at_next = compute_alpha(self.betas, next_t.long())
-                        sigma_t = (1 - at_next).sqrt()
                         xt = xs[-1].to('cuda')
 
                         et = model(xt, t)
@@ -576,22 +575,18 @@ class Diffusion(object):
                         x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
 
                         # Eq. 19
-                        if sigma_t >= at_next * sigma_y:
+                        s = (1 - at_next).sqrt()
+                        if s >= at_next.sqrt() * sigma_y:
                             lambda_t = 1.
-                            gamma_t = (sigma_t ** 2 - (at_next * sigma_y) ** 2).sqrt()
+                            gamma_t = (s ** 2 - at_next * sigma_y ** 2).sqrt()
                         else:
-                            lambda_t = sigma_t / (at_next * sigma_y)
+                            lambda_t = s / (at_next.sqrt() * sigma_y)
                             gamma_t = 0.
 
                         # Eq. 17
                         x0_t_hat = x0_t - lambda_t * Ap(y=A(x0_t) - y, current_t=i)
-                        eta = self.args.eta
-
-                        c1 = (1 - at_next).sqrt() * eta
-                        c2 = (1 - at_next).sqrt() * ((1 - eta ** 2) ** 0.5)
-
-                        # different from the paper, we use DDIM here instead of DDPM
-                        xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (c1 * torch.randn_like(x0_t) + c2 * et)
+                        xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (
+                                    eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
 
                         x0_preds.append(x0_t.to('cpu'))
                         xs.append(xt_next.to('cpu'))
