@@ -472,8 +472,7 @@ class Diffusion(object):
         print("args.deg:", args.deg)
         if args.deg == 'diy_cg':
             A = lambda x: apply_A(x, config)
-            Ap = lambda y, current_t=1000: apply_Ap_cg(y=y, current_t=current_t, config=config,
-                                                       has_noise=self.args.add_noise)
+            Ap = lambda y, current_t=1000: apply_Ap_cg(y=y, current_t=current_t, config=config, has_noise=self.args.add_noise)
         else:
             raise NotImplementedError("degradation type not supported")
 
@@ -576,16 +575,23 @@ class Diffusion(object):
                         # Eq. 12
                         x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
 
-                        s = (1 - at_next).sqrt()
-                        if s >= at_next.sqrt() * sigma_y:
+                        # Eq. 19
+                        if sigma_t >= at_next * sigma_y:
                             lambda_t = 1.
-                            gamma_t = (s ** 2 - at_next * sigma_y ** 2).sqrt()
+                            gamma_t = (sigma_t ** 2 - (at_next * sigma_y) ** 2).sqrt()
                         else:
-                            lambda_t = s / (at_next.sqrt() * sigma_y)
+                            lambda_t = sigma_t / (at_next * sigma_y)
                             gamma_t = 0.
-                        x0_t_hat = x0_t - lambda_t * Ap(A(x0_t) - y)
-                        xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (
-                                    eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
+
+                        # Eq. 17
+                        x0_t_hat = x0_t - lambda_t * Ap(y=A(x0_t) - y, current_t=i)
+                        eta = self.args.eta
+
+                        c1 = (1 - at_next).sqrt() * eta
+                        c2 = (1 - at_next).sqrt() * ((1 - eta ** 2) ** 0.5)
+
+                        # different from the paper, we use DDIM here instead of DDPM
+                        xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (c1 * torch.randn_like(x0_t) + c2 * et)
 
                         x0_preds.append(x0_t.to('cpu'))
                         xs.append(xt_next.to('cpu'))
