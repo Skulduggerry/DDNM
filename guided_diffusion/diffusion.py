@@ -276,7 +276,7 @@ def make_A_At(config, x_template):
 A_fn, At_fn = None, None
 
 
-def apply_Ap_cg(y, current_t, config, has_noise):
+def apply_Ap_cg(y, config, has_noise, gamma_t, eta):
     global A_fn, At_fn
 
     b, c, h, w = y.shape
@@ -287,8 +287,7 @@ def apply_Ap_cg(y, current_t, config, has_noise):
     rho_max = float(config.ddnm.cg_rho_max)
     max_iter = int(config.ddnm.cg_max_iter)
 
-    progress = (1000 - current_t) / 1000
-    rho = rho_min + progress * (rho_max - rho_min) if has_noise else 0
+    rho = gamma_t * eta if has_noise else 0
 
     if A_fn is None or At_fn is None:
         x_template = torch.zeros(
@@ -472,8 +471,8 @@ class Diffusion(object):
         print("args.deg:", args.deg)
         if args.deg == 'diy_cg':
             A = lambda x: apply_A(x, config)
-            Ap = lambda y, current_t=1000: apply_Ap_cg(y=y, current_t=current_t, config=config,
-                                                       has_noise=self.args.add_noise)
+            Ap = lambda y, gamma_t=1e-4: apply_Ap_cg(y=y, config=config,
+                                                     has_noise=self.args.add_noise, gamma_t=gamma_t, eta=self.args.eta)
         else:
             raise NotImplementedError("degradation type not supported")
 
@@ -579,15 +578,16 @@ class Diffusion(object):
                         sigma_t = (1 - at_next).sqrt()
                         if sigma_t >= at_next * sigma_y:
                             lambda_t = 1.
-                            gamma_t = (sigma_t**2 - (at_next*sigma_y)**2).sqrt()
+                            gamma_t = (sigma_t ** 2 - (at_next * sigma_y) ** 2).sqrt()
                         else:
                             lambda_t = sigma_t / (at_next * sigma_y)
                             gamma_t = 0.
 
                         # Eq. 17
                         eta = self.args.eta
-                        x0_t_hat = x0_t - lambda_t * Ap(y=A(x0_t) - y, current_t=i)
-                        xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
+                        x0_t_hat = x0_t - lambda_t * Ap(y=A(x0_t) - y, gamma_t=gamma_t)
+                        xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (
+                                    eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
 
                         x0_preds.append(x0_t.to('cpu'))
                         xs.append(xt_next.to('cpu'))
