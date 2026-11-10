@@ -306,6 +306,38 @@ def apply_Ap_cg(y, current_t, config, has_noise):
         return cg(AtA_rho_fn, b, rtol=rtol, max_iter=max_iter)
 
 
+def high_pass(x, cutoff=0.2):
+
+    h, w = x.shape[-2:]
+
+    fy = torch.fft.fftfreq(h, device=x.device)
+    fx = torch.fft.fftfreq(w, device=x.device)
+
+    yy, xx = torch.meshgrid(
+        fy, fx, indexing="ij"
+    )
+
+    mask = torch.sqrt(xx**2 + yy**2) > cutoff
+
+    spectrum = torch.fft.fft2(x, norm="ortho")
+
+    return torch.fft.ifft2(
+        spectrum * mask,
+        norm="ortho"
+    ).real
+
+
+def hf_relative_error(x, reference):
+
+    hf_x = high_pass(x)
+    hf_reference = high_pass(reference)
+
+    return (
+        torch.norm(hf_x - hf_reference)
+        / torch.norm(hf_reference).clamp_min(1e-12)
+    )
+
+
 class Diffusion(object):
     def __init__(self, args, config, device=None):
         self.args = args
@@ -570,6 +602,21 @@ class Diffusion(object):
                         x0_t_hat = x0_t - lambda_t * Ap(y=A(x0_t) - y, current_t=i)
                         xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (
                                     eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
+
+                        hf_error_before = hf_relative_error(
+                            x0_t, x_orig
+                        )
+
+                        hf_error_after = hf_relative_error(
+                            x0_t_hat, x_orig
+                        )
+
+                        print(
+                            f"t={i:4d} "
+                            f"HF error={hf_error_before.item():.5f}"
+                            f"->{hf_error_after.item():.5f}",
+                            flush=True
+                        )
 
                         x0_preds.append(x0_t.to('cpu'))
                         xs.append(xt_next.to('cpu'))
