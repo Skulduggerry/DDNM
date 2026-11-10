@@ -613,11 +613,14 @@ class Diffusion(object):
 
                         if i % 20 == 0 or i == 0:
                             print(
+                                "\n"
                                 f"t={i:4d} lambda={lambda_t:.4f} "
                                 f"residual={r_before.item():.5f}"
                                 f"->{r_after.item():.5f} "
                                 f"HF={hf_before.item():.5f}"
                                 f"->{hf_after.item():.5f}"
+                                "\n",
+                                flush=True
                             )
 
                         xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (
