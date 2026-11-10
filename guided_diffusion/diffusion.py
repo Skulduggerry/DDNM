@@ -515,6 +515,11 @@ class Diffusion(object):
         avg_lpips_Apy = 0.0
         avg_norm_error_Apy = 0.0
 
+        lpips_metric = LearnedPerceptualImagePatchSimilarity(
+            net_type="alex",
+            normalize=True
+        ).to(self.device)
+
         visit_counts = {}
 
         selected_timesteps = {
