@@ -617,7 +617,7 @@ class Diffusion(object):
                             torch.Tensor([(i - 20.0) / 60.0]),
                             min=torch.Tensor([0.0]),
                             max=torch.Tensor([1.0])
-                        )
+                        ).to(device=self.device)
 
                         lambda_t = lambda_original * correction_weight
 
