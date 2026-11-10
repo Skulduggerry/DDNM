@@ -282,12 +282,18 @@ def apply_Ap_cg(y, current_t, config, has_noise):
     assert h == w
 
     rtol = float(config.ddnm.cg_rtol)
+    cg_rho_switch = float(config.ddnm.cg_rho_switch)
     rho_min = float(config.ddnm.cg_rho_min)
     rho_max = float(config.ddnm.cg_rho_max)
     max_iter = int(config.ddnm.cg_max_iter)
 
-    progress = (1000 - current_t) / 1000
-    rho = rho_min + progress * (rho_max - rho_min) if has_noise else 0
+    if not has_noise:
+        rho = 0
+    elif current_t < cg_rho_switch:
+        progress = (cg_rho_switch - current_t) / cg_rho_switch
+        rho = rho_max - progress * (rho_max - rho_min)
+    else:
+        rho = rho_max
 
     if A_fn is None or At_fn is None:
         x_template = torch.zeros(
