@@ -569,7 +569,7 @@ class Diffusion(object):
                         eta = self.args.eta
                         x0_t_hat = x0_t - lambda_t * Ap(y=A(x0_t) - y, current_t=i)
                         xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (
-                                eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
+                                    eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
 
                         x0_preds.append(x0_t.to('cpu'))
                         xs.append(xt_next.to('cpu'))
@@ -593,20 +593,13 @@ class Diffusion(object):
                                 f"{self.args.image_folder}/debug_ddnm/xt_next/xt_next_{i:04d}.png"
                             )
                     else:  # time-travel back
-                        x_i = xs[-1].to(self.device)
+                        next_t = (torch.ones(n) * j).to(x.device)
+                        at_next = compute_alpha(self.betas, next_t.long())
+                        x0_t = x0_preds[-1].to('cuda')
 
-                        t_i = torch.full((n,), i, device=self.device, dtype=torch.long)
+                        xt_next = at_next.sqrt() * x0_t + torch.randn_like(x0_t) * (1 - at_next).sqrt()
 
-                        t_j = torch.full((n,), j, device=self.device, dtype=torch.long)
-
-                        alpha_i = compute_alpha(self.betas, t_i)
-                        alpha_j = compute_alpha(self.betas, t_j)
-
-                        ratio = (alpha_j / alpha_i).clamp(0.0, 1.0)
-
-                        xt_next = (ratio.sqrt() * x_i + (1.0 - ratio).sqrt() * torch.randn_like(x_i))
-
-                        xs.append(xt_next.cpu())
+                        xs.append(xt_next.to('cpu'))
 
                 x = xs[-1]
 
