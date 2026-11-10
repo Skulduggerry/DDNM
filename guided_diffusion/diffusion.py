@@ -560,7 +560,7 @@ class Diffusion(object):
                         sigma_t = (1 - at_next).sqrt()
                         if sigma_t >= at_next * sigma_y:
                             lambda_t = 1.
-                            gamma_t = (sigma_t**2 - (at_next*sigma_y)**2).sqrt()
+                            gamma_t = (sigma_t ** 2 - (at_next * sigma_y) ** 2).sqrt()
                         else:
                             lambda_t = sigma_t / (at_next * sigma_y)
                             gamma_t = 0.
@@ -568,7 +568,8 @@ class Diffusion(object):
                         # Eq. 17
                         eta = self.args.eta
                         x0_t_hat = x0_t - lambda_t * Ap(y=A(x0_t) - y, current_t=i)
-                        xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
+                        xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (
+                                eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
 
                         x0_preds.append(x0_t.to('cpu'))
                         xs.append(xt_next.to('cpu'))
@@ -592,13 +593,20 @@ class Diffusion(object):
                                 f"{self.args.image_folder}/debug_ddnm/xt_next/xt_next_{i:04d}.png"
                             )
                     else:  # time-travel back
-                        next_t = (torch.ones(n) * j).to(x.device)
-                        at_next = compute_alpha(self.betas, next_t.long())
-                        x0_t = x0_preds[-1].to('cuda')
+                        x_i = xs[-1].to(self.device)
 
-                        xt_next = at_next.sqrt() * x0_t + torch.randn_like(x0_t) * (1 - at_next).sqrt()
+                        t_i = torch.full((n,), i, device=self.device, dtype=torch.long)
 
-                        xs.append(xt_next.to('cpu'))
+                        t_j = torch.full((n,), j, device=self.device, dtype=torch.long)
+
+                        alpha_i = compute_alpha(self.betas, t_i)
+                        alpha_j = compute_alpha(self.betas, t_j)
+
+                        ratio = (alpha_j / alpha_i).clamp(0.0, 1.0)
+
+                        xt_next = (ratio.sqrt() * x_i + (1.0 - ratio).sqrt() * torch.randn_like(x_i))
+
+                        xs.append(xt_next.cpu())
 
                 x = xs[-1]
 
