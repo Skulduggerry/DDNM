@@ -306,30 +306,6 @@ def apply_Ap_cg(y, current_t, config, has_noise):
         return cg(AtA_rho_fn, b, rtol=rtol, max_iter=max_iter)
 
 
-def high_frequency_ratio(x, cutoff=0.2):
-    x = x.float()
-
-    spectrum = torch.fft.rfft2(x, norm="ortho")
-    power = spectrum.abs().square()
-
-    fy = torch.fft.fftfreq(
-        x.shape[-2], device=x.device
-    )
-    fx = torch.fft.rfftfreq(
-        x.shape[-1], device=x.device
-    )
-
-    yy, xx = torch.meshgrid(fy, fx, indexing="ij")
-    radius = torch.sqrt(xx ** 2 + yy ** 2)
-
-    mask = (radius > cutoff).to(power.dtype)
-
-    return (
-            (power * mask).sum()
-            / power.sum().clamp_min(1e-12)
-    )
-
-
 class Diffusion(object):
     def __init__(self, args, config, device=None):
         self.args = args
@@ -591,40 +567,9 @@ class Diffusion(object):
 
                         # Eq. 17
                         eta = self.args.eta
-
-                        # Before data consistency
-                        r_before = (
-                                torch.norm(A(x0_t) - y)
-                                / torch.norm(y).clamp_min(1e-12)
-                        )
-
-                        hf_before = high_frequency_ratio(x0_t)
-
-                        # Data consistency
                         x0_t_hat = x0_t - lambda_t * Ap(y=A(x0_t) - y, current_t=i)
-
-                        # After data consistency
-                        r_after = (
-                                torch.norm(A(x0_t_hat) - y)
-                                / torch.norm(y).clamp_min(1e-12)
-                        )
-
-                        hf_after = high_frequency_ratio(x0_t_hat)
-
-                        if i % 20 == 0 or i == 0:
-                            print(
-                                "\n"
-                                f"t={i:4d} lambda={lambda_t:.4f} "
-                                f"residual={r_before.item():.5f}"
-                                f"->{r_after.item():.5f} "
-                                f"HF={hf_before.item():.5f}"
-                                f"->{hf_after.item():.5f}"
-                                "\n",
-                                flush=True
-                            )
-
                         xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (
-                                eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
+                                    eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
 
                         x0_preds.append(x0_t.to('cpu'))
                         xs.append(xt_next.to('cpu'))
