@@ -579,6 +579,9 @@ class Diffusion(object):
                     if j < 0: j = -1
 
                     if j < i:  # normal sampling
+                        visit = visit_counts.get(i, 0)
+                        visit_counts[i] = visit + 1
+
                         t = (torch.ones(n) * i).to(x.device)
                         next_t = (torch.ones(n) * j).to(x.device)
                         at = compute_alpha(self.betas, t.long())
