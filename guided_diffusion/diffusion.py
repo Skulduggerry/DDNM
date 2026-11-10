@@ -610,10 +610,7 @@ class Diffusion(object):
                         )
 
                         with open(os.path.join(self.args.image_folder, f"{idx_so_far}/test.txt"), mode='a') as f:
-                            f.write(f"t={i:4d} "
-                                    f"HF error={hf_error_before.item():.5f}"
-                                    f"->{hf_error_after.item():.5f}"
-                                    "\n")
+                            f.write(f"t={i:4d} HF error={hf_error_before.item():.5f}->{hf_error_after.item():.5f}\n")
 
                         x0_preds.append(x0_t.to('cpu'))
                         xs.append(xt_next.to('cpu'))
