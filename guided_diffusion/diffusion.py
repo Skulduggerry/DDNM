@@ -614,9 +614,9 @@ class Diffusion(object):
 
                         # Additional late-stage weighting
                         correction_weight = torch.clamp(
-                            (i - 20.0) / 60.0,
-                            min=0.0,
-                            max=1.0
+                            torch.Tensor((i - 20.0) / 60.0),
+                            min=torch.Tensor(0.0),
+                            max=torch.Tensor(1.0)
                         )
 
                         lambda_t = lambda_original * correction_weight
