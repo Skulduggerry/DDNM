@@ -5,8 +5,8 @@ ddnm:
     kernel_size: 15
 
     cg_rtol: 1e-5
-    cg_rho_min: 1e-4
-    cg_rho_max: 2e-2
+    cg_rho_min: 1e-2
+    cg_rho_max: 1e-2
     cg_max_iter: 30
 
 data:
@@ -51,8 +51,8 @@ diffusion:
 
 sampling:
     batch_size: 1
-    
+
 time_travel:
-    T_sampling: 250
+    T_sampling: 500
     travel_length: 1
-    travel_repeat: 2
+    travel_repeat: 1
