@@ -657,7 +657,7 @@ class Diffusion(object):
             Apy = inverse_data_transform(config, Apy[0])[:, 4:252, 4:252].unsqueeze(0).to(self.device)
             diff_Apy = Apy - orig
 
-            lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='alex').to(self.device)
+            lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='alex', normalize=True).to(self.device)
 
             mse = torch.mean(diff ** 2)
             psnr = 10 * torch.log10(1 / mse)
