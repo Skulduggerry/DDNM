@@ -609,8 +609,10 @@ class Diffusion(object):
                         # Eq. 17
                         eta = self.args.eta
                         x0_t_hat = x0_t - lambda_t * Ap(y=A(x0_t) - y, current_t=i)
-                        xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (
-                                    eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
+                        c1 = (1 - at_next).sqrt() * eta
+                        c2 = (1 - at_next).sqrt() * ((1 - eta ** 2) ** 0.5)
+                        # different from the paper, we use DDIM here instead of DDPM
+                        xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (c1 * torch.randn_like(x0_t) + c2 * et)
 
                         if i in selected_timesteps:
                             for name, pred in [("raw", x0_t), ("corrected", x0_t_hat)]:
