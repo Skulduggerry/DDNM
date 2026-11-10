@@ -515,6 +515,13 @@ class Diffusion(object):
         avg_lpips_Apy = 0.0
         avg_norm_error_Apy = 0.0
 
+        visit_counts = {}
+
+        selected_timesteps = {
+            0, 20, 40, 60, 80, 100, 120,
+            160, 200, 300, 400, 500, 600, 800
+        }
+
         for x_orig, classes in pbar:
             x_orig = x_orig.to(self.device)
             x_orig = x_orig.to(self.device)
@@ -601,21 +608,35 @@ class Diffusion(object):
                         xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (
                                 eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
 
-                        hf_error_before = hf_relative_error(
-                            x0_t, x_orig
-                        )
+                        if i in selected_timesteps:
+                            for name, pred in [("raw", x0_t), ("corrected", x0_t_hat)]:
+                                pred01 = inverse_data_transform(config, pred[0]).clamp(0, 1)
+                                ref01 = inverse_data_transform(config, x_orig[0]).clamp(0, 1)
+                                mse = torch.mean((pred01 - ref01) ** 2)
+                                psnr = 10 * torch.log10(
+                                    1.0 / mse.clamp_min(1e-12)
+                                )
+                                lpips = lpips_metric(
+                                    pred01.unsqueeze(0),
+                                    ref01.unsqueeze(0)
+                                )
+                                hf = hf_relative_error(pred, x_orig)
 
-                        hf_error_after = hf_relative_error(
-                            x0_t_hat, x_orig
-                        )
-
-                        with open(os.path.join(self.args.image_folder, f"{idx_so_far}/test.txt"), mode='a') as f:
-                            f.write(f"t={i:4d} HF error={hf_error_before.item():.5f}->{hf_error_after.item():.5f}\n")
+                                with open(os.path.join(self.args.image_folder, f"{idx_so_far}/test.txt"),
+                                          mode='a') as f:
+                                    f.write(
+                                        f"t={i:4d} visit={visit} {name:10s} "
+                                        f"MSE={mse.item():.6f} "
+                                        f"PSNR={psnr.item():.2f} "
+                                        f"LPIPS={lpips.item():.4f} "
+                                        f"HF={hf.item():.5f}"
+                                        "\n"
+                                    )
 
                         x0_preds.append(x0_t.to('cpu'))
                         xs.append(xt_next.to('cpu'))
 
-                        if i % 20 == 0:
+                        if i % 100 == 0:
                             os.makedirs(f"{self.args.image_folder}/debug_ddnm/x0_t/", exist_ok=True)
                             tvu.save_image(
                                 inverse_data_transform(config, x0_t[0]),
