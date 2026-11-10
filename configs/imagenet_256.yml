@@ -5,9 +5,7 @@ ddnm:
     kernel_size: 15
 
     cg_rtol: 1e-5
-    cg_rho_switch: 100
-    cg_rho_min: 0
-    cg_rho_max: 2e-2
+    cg_rho: 2e-2
     cg_max_iter: 30
 
 data:
