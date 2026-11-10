@@ -610,6 +610,17 @@ class Diffusion(object):
                             lambda_t = sigma_t / (at_next * sigma_y)
                             gamma_t = 0.
 
+                        lambda_original = lambda_t
+
+                        # Additional late-stage weighting
+                        correction_weight = torch.clamp(
+                            (i - 20.0) / 60.0,
+                            min=0.0,
+                            max=1.0
+                        )
+
+                        lambda_t = lambda_original * correction_weight
+
                         # Eq. 17
                         eta = self.args.eta
                         x0_t_hat = x0_t - lambda_t * Ap(y=A(x0_t) - y, current_t=i)
