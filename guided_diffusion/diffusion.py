@@ -615,7 +615,7 @@ class Diffusion(object):
                         x0_preds.append(x0_t.to('cpu'))
                         xs.append(xt_next.to('cpu'))
 
-                        if i % 100 == 0:
+                        if i % 20 == 0:
                             os.makedirs(f"{self.args.image_folder}/debug_ddnm/x0_t/", exist_ok=True)
                             tvu.save_image(
                                 inverse_data_transform(config, x0_t[0]),
