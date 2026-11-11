@@ -458,7 +458,7 @@ class Diffusion(object):
         print("args.deg:", args.deg)
         if args.deg == 'diy_cg':
             A = lambda x: apply_A(x, config)
-            Ap = lambda y, rho=2e-2: apply_Ap_cg(y=y, config=config, has_noise=self.args.add_noise, rho=rho_t)
+            Ap = lambda y, rho=2e-2: apply_Ap_cg(y=y, config=config, has_noise=self.args.add_noise, rho=rho)
         elif args.deg == 'inpainting':
             loaded = np.load("exp/inp_masks/mask.npy")
             mask = torch.from_numpy(loaded).to(self.device)
