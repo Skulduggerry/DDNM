@@ -275,14 +275,14 @@ def make_A_At(config, x_template):
 A_fn, At_fn = None, None
 
 
-def apply_Ap_cg(y, config, has_noise, rho):
+def apply_Ap_cg(y, config, has_noise):
     global A_fn, At_fn
 
     b, c, h, w = y.shape
     assert h == w
 
     rtol = float(config.ddnm.cg_rtol)
-    rho = rho if has_noise else 0
+    rho = float(config.ddnm.cg_rho) if has_noise else 0
     max_iter = int(config.ddnm.cg_max_iter)
 
     if A_fn is None or At_fn is None:
@@ -458,7 +458,7 @@ class Diffusion(object):
         print("args.deg:", args.deg)
         if args.deg == 'diy_cg':
             A = lambda x: apply_A(x, config)
-            Ap = lambda y, rho=2e-2: apply_Ap_cg(y=y, config=config, has_noise=self.args.add_noise, rho=rho)
+            Ap = lambda y: apply_Ap_cg(y=y, config=config, has_noise=self.args.add_noise)
         elif args.deg == 'inpainting':
             loaded = np.load("exp/inp_masks/mask.npy")
             mask = torch.from_numpy(loaded).to(self.device)
@@ -572,14 +572,9 @@ class Diffusion(object):
 
                         # Eq. 17
                         eta = self.args.eta
-                        lam = 1
-
-                        rho_t = lam * sigma_y ** 2 * at / (1 - at)  # lam around 1 to 8
-                        x0_t_hat = x0_t - Ap(A(x0_t) - y, rho=rho_t)
-                        eps_hat = (xt - at.sqrt() * x0_t_hat) / (1 - at).sqrt()
-                        xt_next = at_next.sqrt() * x0_t_hat + (1 - at_next).sqrt() * (
-                                    eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * eps_hat)
-
+                        x0_t_hat = x0_t - lambda_t * Ap(A(x0_t) - y)
+                        xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (
+                                eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
 
                         x0_preds.append(x0_t.to('cpu'))
                         xs.append(xt_next.to('cpu'))
@@ -651,7 +646,7 @@ class Diffusion(object):
                 PSNR={psnr}
                 LPIPS={lpips}
                 Norm Error={norm_error}
-                
+
                 Apy:
                 MSE={mse_Apy}
                 PSNR={psnr_Apy}
@@ -679,7 +674,7 @@ class Diffusion(object):
             Total Average PSNR={avg_psnr}
             Total Average LPIPS={avg_lpips}
             Total Average Norm Error={avg_norm_error}
-            
+
             Apy:
             Total Average MSE={avg_mse_Apy}
             Total Average PSNR={avg_psnr_Apy}
