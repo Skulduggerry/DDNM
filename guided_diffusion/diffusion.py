@@ -655,7 +655,7 @@ class Diffusion(object):
                 """)
             idx_so_far += y.shape[0]
 
-            pbar.set_description("PSNR: %.2f" % (avg_psnr / (idx_so_far - idx_init)))
+            pbar.set_description("LPIPS: %.4f" % (avg_lpips / (idx_so_far - idx_init)))
 
         avg_mse /= (idx_so_far - idx_init)
         avg_psnr /= (idx_so_far - idx_init)
@@ -669,17 +669,17 @@ class Diffusion(object):
 
         with open(os.path.join(self.args.image_folder, f"errors.txt"), mode='w') as f:
             f.write(f"""
-                Reconstructed:
-                Total Average MSE={avg_mse}
-                Total Average PSNR={avg_psnr}
-                Total Average LPIPS={avg_lpips}
-                Total Average Norm Error={avg_norm_error}
-                
-                Apy:
-                Total Average MSE={avg_mse_Apy}
-                Total Average PSNR={avg_psnr_Apy}
-                Total Average LPIPS={avg_lpips_Apy}
-                Total Average Norm Error={avg_norm_error_Apy}
+            Reconstructed:
+            Total Average MSE={avg_mse}
+            Total Average PSNR={avg_psnr}
+            Total Average LPIPS={avg_lpips}
+            Total Average Norm Error={avg_norm_error}
+            
+            Apy:
+            Total Average MSE={avg_mse_Apy}
+            Total Average PSNR={avg_psnr_Apy}
+            Total Average LPIPS={avg_lpips_Apy}
+            Total Average Norm Error={avg_norm_error_Apy}
             """)
 
         print("Total Average PSNR: %.2f" % avg_psnr)
