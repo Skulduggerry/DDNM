@@ -6,7 +6,7 @@ import torch
 import torch.utils.data as data
 import torchvision.utils as tvu
 import tqdm
-#from deeplens import GeoLens
+from deeplens import GeoLens
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 from datasets import get_dataset, data_transform, inverse_data_transform
