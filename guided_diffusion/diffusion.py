@@ -608,7 +608,7 @@ class Diffusion(object):
 
                         # Eq. 17
                         eta = self.args.eta
-                        x0_t_hat = x0_t - lambda_t * Ap(y=A(x0_t) - y, current_t=i)
+                        x0_t_hat = x0_t
                         xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (
                                 eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
 

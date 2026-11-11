@@ -1,3 +1,13 @@
+ddnm:
+    output_size: 256
+    repeat_cnt: 4
+    shift: 1
+    kernel_size: 15
+
+    cg_rtol: 1e-5
+    cg_rho: 2e-2
+    cg_max_iter: 30
+
 data:
     dataset: "CelebA_HQ"
     category: ""
@@ -35,6 +45,6 @@ sampling:
     batch_size: 1
     
 time_travel:
-    T_sampling: 100
+    T_sampling: 250
     travel_length: 1
-    travel_repeat: 1
+    travel_repeat: 2
