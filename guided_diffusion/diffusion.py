@@ -641,17 +641,17 @@ class Diffusion(object):
 
             with open(os.path.join(self.args.image_folder, f"{idx_so_far}/errors.txt"), mode='w') as f:
                 f.write(f"""
-                    Reconstructed:
-                    MSE={mse}
-                    PSNR={psnr}
-                    LPIPS={lpips}
-                    Norm Error={norm_error}
-                    
-                    Apy:
-                    MSE={mse_Apy}
-                    PSNR={psnr_Apy}
-                    LPIPS={lpips_Apy}
-                    Norm Error={norm_error_Apy}
+                Reconstructed:
+                MSE={mse}
+                PSNR={psnr}
+                LPIPS={lpips}
+                Norm Error={norm_error}
+                
+                Apy:
+                MSE={mse_Apy}
+                PSNR={psnr_Apy}
+                LPIPS={lpips_Apy}
+                Norm Error={norm_error_Apy}
                 """)
             idx_so_far += y.shape[0]
 
