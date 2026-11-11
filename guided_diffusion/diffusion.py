@@ -302,36 +302,6 @@ def apply_Ap_cg(y, current_t, config, has_noise):
         return cg(AtA_rho_fn, b, rtol=rtol, max_iter=max_iter)
 
 
-def high_pass(x, cutoff=0.2):
-    h, w = x.shape[-2:]
-
-    fy = torch.fft.fftfreq(h, device=x.device)
-    fx = torch.fft.fftfreq(w, device=x.device)
-
-    yy, xx = torch.meshgrid(
-        fy, fx, indexing="ij"
-    )
-
-    mask = torch.sqrt(xx ** 2 + yy ** 2) > cutoff
-
-    spectrum = torch.fft.fft2(x, norm="ortho")
-
-    return torch.fft.ifft2(
-        spectrum * mask,
-        norm="ortho"
-    ).real
-
-
-def hf_relative_error(x, reference):
-    hf_x = high_pass(x)
-    hf_reference = high_pass(reference)
-
-    return (
-            torch.norm(hf_x - hf_reference)
-            / torch.norm(hf_reference).clamp_min(1e-12)
-    )
-
-
 class Diffusion(object):
     def __init__(self, args, config, device=None):
         self.args = args
@@ -521,13 +491,6 @@ class Diffusion(object):
             normalize=True
         ).to(self.device)
 
-        visit_counts = {}
-
-        selected_timesteps = {
-            0, 20, 40, 60, 80, 100, 120,
-            160, 200, 300, 400, 500, 600, 800
-        }
-
         for x_orig, classes in pbar:
             x_orig = x_orig.to(self.device)
             x_orig = x_orig.to(self.device)
@@ -585,9 +548,6 @@ class Diffusion(object):
                     if j < 0: j = -1
 
                     if j < i:  # normal sampling
-                        visit = visit_counts.get(i, 0)
-                        visit_counts[i] = visit + 1
-
                         t = (torch.ones(n) * i).to(x.device)
                         next_t = (torch.ones(n) * j).to(x.device)
                         at = compute_alpha(self.betas, t.long())
@@ -616,31 +576,6 @@ class Diffusion(object):
                         x0_t_hat = x0_t - lambda_t * Ap(y=A(x0_t) - y, current_t=i)
                         xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (
                                 eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
-
-                        if i in selected_timesteps:
-                            for name, pred in [("raw", x0_t), ("corrected", x0_t_hat)]:
-                                pred01 = inverse_data_transform(config, pred[0]).clamp(0, 1)
-                                ref01 = inverse_data_transform(config, x_orig[0]).clamp(0, 1)
-                                mse = torch.mean((pred01 - ref01) ** 2)
-                                psnr = 10 * torch.log10(
-                                    1.0 / mse.clamp_min(1e-12)
-                                )
-                                lpips = lpips_metric(
-                                    pred01.unsqueeze(0),
-                                    ref01.unsqueeze(0)
-                                )
-                                hf = hf_relative_error(pred, x_orig)
-
-                                with open(os.path.join(self.args.image_folder, f"{idx_so_far}/test.txt"),
-                                          mode='a') as f:
-                                    f.write(
-                                        f"t={i:4d} visit={visit} {name:10s} "
-                                        f"MSE={mse.item():.6f} "
-                                        f"PSNR={psnr.item():.2f} "
-                                        f"LPIPS={lpips.item():.4f} "
-                                        f"HF={hf.item():.5f}"
-                                        "\n"
-                                    )
 
                         x0_preds.append(x0_t.to('cpu'))
                         xs.append(xt_next.to('cpu'))
@@ -686,8 +621,6 @@ class Diffusion(object):
 
             Apy = inverse_data_transform(config, Apy[0])[:, 4:252, 4:252].unsqueeze(0).to(self.device)
             diff_Apy = Apy - orig
-
-            lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='alex', normalize=True).to(self.device)
 
             mse = torch.mean(diff ** 2)
             psnr = 10 * torch.log10(1 / mse)
