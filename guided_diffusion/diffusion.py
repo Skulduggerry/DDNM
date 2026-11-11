@@ -275,7 +275,7 @@ def make_A_At(config, x_template):
 A_fn, At_fn = None, None
 
 
-def apply_Ap_cg(y, current_t, config, has_noise):
+def apply_Ap_cg(y, config, has_noise):
     global A_fn, At_fn
 
     b, c, h, w = y.shape
@@ -458,12 +458,11 @@ class Diffusion(object):
         print("args.deg:", args.deg)
         if args.deg == 'diy_cg':
             A = lambda x: apply_A(x, config)
-            Ap = lambda y, current_t=1000: apply_Ap_cg(y=y, current_t=current_t, config=config,
-                                                       has_noise=self.args.add_noise)
-        elif args.deg =='inpainting':
+            Ap = lambda y: apply_Ap_cg(y=y, config=config, has_noise=self.args.add_noise)
+        elif args.deg == 'inpainting':
             loaded = np.load("exp/inp_masks/mask.npy")
             mask = torch.from_numpy(loaded).to(self.device)
-            A = lambda z: z*mask
+            A = lambda z: z * mask
             Ap = A
         else:
             raise NotImplementedError("degradation type not supported")
@@ -573,7 +572,7 @@ class Diffusion(object):
 
                         # Eq. 17
                         eta = self.args.eta
-                        x0_t_hat = x0_t - lambda_t * Ap(y=A(x0_t) - y, current_t=i)
+                        x0_t_hat = x0_t - lambda_t * Ap(A(x0_t) - y)
                         xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (
                                 eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
 
