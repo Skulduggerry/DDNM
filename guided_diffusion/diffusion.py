@@ -6,7 +6,7 @@ import torch
 import torch.utils.data as data
 import torchvision.utils as tvu
 import tqdm
-from deeplens import GeoLens
+#from deeplens import GeoLens
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 from datasets import get_dataset, data_transform, inverse_data_transform
@@ -446,13 +446,13 @@ class Diffusion(object):
 
                 cls_fn = cond_fn
 
-            print('Run Simplified DDNM, without SVD.',
-                  f'{self.config.time_travel.T_sampling} sampling steps.',
-                  f'travel_length = {self.config.time_travel.travel_length},',
-                  f'travel_repeat = {self.config.time_travel.travel_repeat}.',
-                  f'Task: {self.args.deg}.'
-                  )
-            self.simplified_ddnm_plus(model, cls_fn)
+        print('Run Simplified DDNM, without SVD.',
+              f'{self.config.time_travel.T_sampling} sampling steps.',
+              f'travel_length = {self.config.time_travel.travel_length},',
+              f'travel_repeat = {self.config.time_travel.travel_repeat}.',
+              f'Task: {self.args.deg}.'
+              )
+        self.simplified_ddnm_plus(model, cls_fn)
 
     def simplified_ddnm_plus(self, model, cls_fn):
         args, config = self.args, self.config
