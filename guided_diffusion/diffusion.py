@@ -221,7 +221,7 @@ class TOMBOForwardOperator:
         self.max_iter = int(config.ddnm.cg_max_iter)
 
         assert self.rtol >= 0
-        assert self.rho > 0
+        assert self.rho >= 0
         assert self.max_iter > 0
 
         # =========================
@@ -271,7 +271,7 @@ class TOMBOForwardOperator:
                 dtype=self.dtype,
             )
             _, vjp_fn = torch.func.vjp(lambda x: self.forward(x), x_template)
-            self.forward_transpose = vjp_fn[0]
+            self.forward_transpose = lambda y: vjp_fn(y)[0]
 
         print("TOMBO operator initialized:")
         print("  Input size:", self.image_size)
@@ -320,22 +320,20 @@ class TOMBOForwardOperator:
         # Treat every patch/channel combination as
         # an independent convolution channel.
 
-        optical_input = patches.reshape(1, b * num_units * c, h, w)
+        optical_input = patches.reshape(b * num_units, c, h, w)
 
-        # Reflection boundary handling.
+        weights = self.psfs.to(device=x.device, dtype=x.dtype, ).unsqueeze(1)
+
         optical_input = F.pad(
             optical_input,
             (padding, padding, padding, padding),
             mode="reflect",
         )
 
-        # PyTorch conv2d performs cross-correlation.
-        # Flip the kernel to obtain convolution.
-
         optical_output = F.conv2d(
             optical_input,
             weights.flip((-2, -1)),
-            groups=b * num_units * c,
+            groups=c,
         )
 
         patches = optical_output.reshape(b, num_units, c, h, w)
@@ -367,6 +365,7 @@ class TOMBOForwardOperator:
     def pinv(self, y):
         b, c, h, w = y.shape
 
+        assert b == 1, "Current CG implementation supports batch size 1."
         assert c == self.channels
         assert h == w == self.output_size
 
@@ -375,7 +374,6 @@ class TOMBOForwardOperator:
             AtA_rho_fn = lambda x: self.forward_transpose(self.forward(x)) + self.rho * x
 
             return cg(AtA_rho_fn, b, rtol=self.rtol, max_iter=self.max_iter)
-
 
 
 class Diffusion(object):
