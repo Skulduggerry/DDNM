@@ -3,6 +3,7 @@ import random
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torch.utils.data as data
 import torchvision.utils as tvu
 import tqdm
@@ -54,177 +55,98 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
 
 def generate_tombo_psfs(
         lens_file,
-        field_points,
-        channels=1,
-        kernel_size=15,
+        channels,
+        kernel_size,
+        psf_grid_resolution=256,
         model="geometric",
         spp=16384,
         device="cuda",
 ):
     assert kernel_size % 2 == 1
 
+    # Load the optical system.
     lens = GeoLens(
         filename=lens_file,
         device=device,
         dtype=torch.float64,
     )
 
+    lens.set_sensor_res((psf_grid_resolution, psf_grid_resolution))
+
     wavelengths = {
         1: [0.588],
         3: [0.656, 0.588, 0.486],
-    }
+    }[channels]
 
-    wavelengths = wavelengths[channels]
+    # All lenses are identical and centered.
+    # Therefore, all use the same central field point.
+    field_point = torch.tensor(
+        [0.0, 0.0, -10000.0],
+        device=device,
+        dtype=torch.float64,
+    )
 
     psfs = []
 
     with torch.no_grad():
 
-        for point in field_points:
+        for wavelength in wavelengths:
 
-            unit_psfs = []
+            psf = lens.psf(
+                points=field_point,
+                ks=kernel_size,
+                wvln=wavelength,
+                model=model,
+                spp=spp,
+                recenter=True,
+            )
 
-            for wavelength in wavelengths:
-                psf = lens.psf(
-                    points=point.to(
-                        device=device,
-                        dtype=torch.float64,
-                    ),
-                    ks=kernel_size,
-                    wvln=wavelength,
-                    model=model,
-                    spp=spp,
-                    recenter=True,
+            psf = psf.clamp_min(0.0)
+            psf_sum = psf.sum()
+
+            if not torch.isfinite(psf_sum) or psf_sum <= 1e-12:
+                raise RuntimeError(
+                    f"Invalid PSF for wavelength {wavelength}"
                 )
 
-                # Ensure a valid normalized intensity kernel.
-                psf = psf.clamp_min(0.0)
-                psf = psf / psf.sum().clamp_min(1e-12)
+            # Normalize the intensity kernel.
+            psf = psf / psf_sum
 
-                unit_psfs.append(psf)
-
-            psfs.append(torch.stack(unit_psfs))
+            psfs.append(psf)
 
     return torch.stack(psfs).float()
 
 
-psfs = None
-
-
-def apply_A(x, config):
-    repeat_cnt = config.ddnm.repeat_cnt
-    shift = config.ddnm.shift
-    ksize = config.ddnm.kernel_size
-    out_size = config.ddnm.output_size
-
+def extract_fractional_patches(x, offsets):
     b, c, h, w = x.shape
-    assert h == w
 
-    size = w - (repeat_cnt - 1) * shift
-    num_units = repeat_cnt ** 2
+    if h <= 1 or w <= 1:
+        raise ValueError("Image dimensions must exceed 1.")
 
-    global psfs
-    if psfs is None:
-        field_points = torch.tensor(
-            [
-                [0.0, 0.0, -10000.0]
-                for _ in range(num_units)
-            ],
-            dtype=torch.float64,
-            device="cuda",
-        )
+    offsets = offsets.to(device=x.device, dtype=x.dtype)
 
-        psfs = generate_tombo_psfs(
-            lens_file="./lenses/cellphone80deg.json",
-            field_points=field_points,
-            channels=config.data.channels,
-            kernel_size=ksize,
-            model="geometric",
-            spp=16384,
-            device="cuda",
-        )
-
-    # =========================
-    # Extract TOMBO sub-images
-    # =========================
-    patches = x.unfold(2, size, shift).unfold(3, size, shift)
-
-    patches = (
-        patches
-        .permute(0, 2, 3, 1, 4, 5)
-        .contiguous()
-        .reshape(b * num_units, c, size, size)
+    yy, xx = torch.meshgrid(
+        torch.arange(h, device=x.device, dtype=x.dtype),
+        torch.arange(w, device=x.device, dtype=x.dtype),
+        indexing="ij",
     )
 
-    # =========================
-    # Optical aberration
-    # =========================
-    patches = patches.reshape(b, num_units, c, size, size)
+    patches = []
 
-    assert psfs.shape[0] == num_units
-    assert psfs.shape[1] == c
-    assert psfs.shape[-1] == psfs.shape[-2]
+    for dy, dx in offsets:
+        gx = xx + dx
+        gy = yy + dy
 
-    kernel_size = psfs.shape[-1]
-    padding = kernel_size // 2
+        gx = 2.0 * gx / (w - 1) - 1.0
+        gy = 2.0 * gy / (h - 1) - 1.0
 
-    assert kernel_size % 2 == 1
-    assert size > padding
+        grid = torch.stack([gx, gy], dim=-1)
+        grid = grid.unsqueeze(0).expand(b, -1, -1, -1)
 
-    weights = (
-        psfs.to(device=x.device, dtype=x.dtype)
-        .unsqueeze(0)
-        .expand(b, -1, -1, -1, -1)
-        .reshape(b * num_units * c, 1, kernel_size, kernel_size)
-    )
+        patch = F.grid_sample(x, grid, mode="bilinear", padding_mode="reflection", align_corners=True)
+        patches.append(patch)
 
-    # Reshape all patches into independent channels.
-    optical_input = patches.reshape(
-        1, b * num_units * c, size, size
-    )
-
-    # Boundary handling: reflection padding.
-    optical_input = torch.nn.functional.pad(
-        optical_input,
-        (padding, padding, padding, padding),
-        mode="reflect",
-    )
-
-    # Apply the unit-specific optical PSFs.
-    # Groups ensure that no lens unit mixes with another.
-
-    optical_output = torch.nn.functional.conv2d(
-        optical_input,
-        weights.flip((-2, -1)),
-        groups=b * num_units * c,
-    )
-
-    # Restore original layout.
-    patches = optical_output.reshape(
-        b, num_units, c, size, size
-    )
-
-    # =========================
-    # Downsampling
-    # =========================
-
-    patches = patches.reshape(
-        b * num_units, c, size, size
-    )
-
-    lens_out_size = out_size // repeat_cnt
-    assert lens_out_size * repeat_cnt == out_size
-
-    patches = torch.nn.functional.adaptive_avg_pool2d(
-        patches,
-        (lens_out_size, lens_out_size),
-    )
-
-    # reshape + permute: (b * repeat_cnt ** 2, c, size, size) -> (b, c, out_size, out_size)
-    patches = patches.reshape(b, repeat_cnt, repeat_cnt, c, lens_out_size, lens_out_size).permute(0, 3, 1, 4, 2, 5)
-    patches = patches.contiguous().reshape(b, c, out_size, out_size)
-
-    return patches
+    return torch.stack(patches, dim=1)
 
 
 def cg(A_op, b, rtol, max_iter):
@@ -259,47 +181,201 @@ def cg(A_op, b, rtol, max_iter):
     return x
 
 
-def make_A_At(config, x_template):
-    A_fn = lambda x: apply_A(x, config)
+class TOMBOForwardOperator:
+    def __init__(self,
+                 config,
+                 has_noise,
+                 lens_file="./lenses/cellphone80deg.json",
+                 device="cuda",
+                 dtype=torch.float32,
+                 model="geometric",
+                 spp=16384):
+        self.device = device
+        self.dtype = dtype
 
-    with torch.enable_grad():
-        _, vjp_fn = torch.func.vjp(A_fn, x_template)
+        self.repeat_cnt = int(config.ddnm.repeat_cnt)
+        self.shift = float(config.ddnm.shift)
 
-    def At_fn(y):
-        with torch.enable_grad():
-            return vjp_fn(y)[0]
+        self.output_size = int(config.ddnm.output_size)
+        self.image_size = int(config.data.image_size)
 
-    return A_fn, At_fn
+        self.channels = int(config.data.channels)
+        self.kernel_size = int(config.ddnm.kernel_size)
 
+        num_units = self.repeat_cnt ** 2
 
-A_fn, At_fn = None, None
+        # Output dimensions of one lens unit.
+        self.lens_out_size = self.output_size // self.repeat_cnt
 
+        assert self.lens_out_size * self.repeat_cnt == self.output_size
 
-def apply_Ap_cg(y, config, has_noise):
-    global A_fn, At_fn
+        # Exact integer downsampling factor.
+        assert self.image_size % self.lens_out_size == 0
 
-    b, c, h, w = y.shape
-    assert h == w
+        self.downsample_factor = (self.image_size // self.lens_out_size)
 
-    rtol = float(config.ddnm.cg_rtol)
-    rho = float(config.ddnm.cg_rho) if has_noise else 0
-    max_iter = int(config.ddnm.cg_max_iter)
+        assert self.kernel_size % 2 == 1
 
-    if A_fn is None or At_fn is None:
-        x_template = torch.zeros(
-            (1, config.data.channels, config.data.image_size, config.data.image_size),
-            device=y.device,
-            dtype=y.dtype,
+        self.rtol = float(config.ddnm.cg_rtol)
+        self.rho = float(config.ddnm.cg_rho) if has_noise else 0
+        self.max_iter = int(config.ddnm.cg_max_iter)
+
+        assert self.rtol >= 0
+        assert self.rho > 0
+        assert self.max_iter > 0
+
+        # =========================
+        # Sampling offsets
+        # =========================
+
+        offsets = [
+            (row * self.shift, col * self.shift)
+            for row in range(self.repeat_cnt)
+            for col in range(self.repeat_cnt)
+        ]
+        offsets = torch.tensor(offsets, dtype=torch.float32, device=device)
+        self.offsets = offsets
+
+        # =========================
+        # Generate shared PSFs
+        # =========================
+
+        psfs = generate_tombo_psfs(
+            lens_file=lens_file,
+            channels=self.channels,
+            kernel_size=self.kernel_size,
+            psf_grid_resolution=self.image_size,  # PSF is calculated at high resolution.
+            model=model,
+            spp=spp,
+            device=device,
         )
-        A_fn, At_fn = make_A_At(config, x_template)
 
-    with torch.no_grad():
-        At_y = At_fn(y)
-        b = At_y
+        # Shape: [C, K, K]
+        self.psfs = psfs
 
-        AtA_rho_fn = lambda x: At_fn(A_fn(x)) + rho * x
+        assert self.psfs.shape == (
+            self.channels,
+            self.kernel_size,
+            self.kernel_size,
+        )
 
-        return cg(AtA_rho_fn, b, rtol=rtol, max_iter=max_iter)
+        assert len(offsets) == num_units
+
+        # =========================
+        # Generate pseudo inverse
+        # =========================
+        with torch.enable_grad():
+            x_template = torch.zeros(
+                (1, config.data.channels, config.data.image_size, config.data.image_size),
+                device=self.device,
+                dtype=self.dtype,
+            )
+            _, vjp_fn = torch.func.vjp(lambda x: self.forward(x), x_template)
+            self.forward_transpose = vjp_fn[0]
+
+        print("TOMBO operator initialized:")
+        print("  Input size:", self.image_size)
+        print("  Number of units:", num_units)
+        print("  Patch size:", self.image_size)
+        print("  Sensor output per unit:", self.lens_out_size)
+        print("  Downsampling factor:", self.downsample_factor)
+        print("  PSF shape:", tuple(self.psfs.shape))
+        print("  Sampling offsets:", self.offsets.cpu().tolist())
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+
+        assert c == self.channels
+        assert h == self.image_size
+        assert w == self.image_size
+
+        num_units = self.repeat_cnt ** 2
+
+        # =========================
+        # Extract TOMBO sub-images
+        # =========================
+
+        patches = extract_fractional_patches(x, self.offsets)
+        # [B, N, C, H, W]
+
+        # =========================
+        # Optical aberration
+        # =========================
+
+        kernel_size = self.kernel_size
+        padding = kernel_size // 2
+
+        # Expand the shared PSFs to all patches.
+        #
+        # [C, K, K] -> [B*N*C, 1, K, K]
+
+        weights = (
+            self.psfs
+            .to(device=x.device, dtype=x.dtype)
+            .unsqueeze(0).unsqueeze(0)
+            .expand(b, num_units, c, kernel_size, kernel_size)
+            .reshape(b * num_units * c, 1, kernel_size, kernel_size)
+        )
+
+        # Treat every patch/channel combination as
+        # an independent convolution channel.
+
+        optical_input = patches.reshape(1, b * num_units * c, h, w)
+
+        # Reflection boundary handling.
+        optical_input = F.pad(
+            optical_input,
+            (padding, padding, padding, padding),
+            mode="reflect",
+        )
+
+        # PyTorch conv2d performs cross-correlation.
+        # Flip the kernel to obtain convolution.
+
+        optical_output = F.conv2d(
+            optical_input,
+            weights.flip((-2, -1)),
+            groups=b * num_units * c,
+        )
+
+        patches = optical_output.reshape(b, num_units, c, h, w)
+
+        # =========================
+        # Downsampling
+        # =========================
+
+        patches = patches.reshape(b * num_units, c, h, w)
+
+        patches = F.avg_pool2d(
+            patches,
+            kernel_size=self.downsample_factor,
+            stride=self.downsample_factor,
+        )
+
+        assert patches.shape[-2:] == (self.lens_out_size, self.lens_out_size,)
+
+        # =========================
+        # Assembly of sub-images
+        # =========================
+
+        patches = patches.reshape(b, self.repeat_cnt, self.repeat_cnt, c, self.lens_out_size, self.lens_out_size)
+        patches = patches.permute(0, 3, 1, 4, 2, 5)
+        patches = patches.contiguous().reshape(b, c, self.output_size, self.output_size)
+
+        return patches
+
+    def pinv(self, y):
+        b, c, h, w = y.shape
+
+        assert c == self.channels
+        assert h == w == self.output_size
+
+        with torch.no_grad():
+            b = self.forward_transpose(y)
+            AtA_rho_fn = lambda x: self.forward_transpose(self.forward(x)) + self.rho * x
+
+            return cg(AtA_rho_fn, b, rtol=self.rtol, max_iter=self.max_iter)
+
 
 
 class Diffusion(object):
@@ -457,13 +533,9 @@ class Diffusion(object):
         # get degradation operator
         print("args.deg:", args.deg)
         if args.deg == 'diy_cg':
-            A = lambda x: apply_A(x, config)
-            Ap = lambda y: apply_Ap_cg(y=y, config=config, has_noise=self.args.add_noise)
-        elif args.deg == 'inpainting':
-            loaded = np.load("exp/inp_masks/mask.npy")
-            mask = torch.from_numpy(loaded).to(self.device)
-            A = lambda z: z * mask
-            Ap = A
+            tombo = TOMBOForwardOperator(config, self.args.add_noise, './lenses/cellphone80deg.json', self.device)
+            A = lambda x: tombo.forward(x)
+            Ap = lambda y: tombo.pinv(y)
         else:
             raise NotImplementedError("degradation type not supported")
 
