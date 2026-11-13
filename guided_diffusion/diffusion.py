@@ -304,46 +304,43 @@ class TOMBOForwardOperator:
         # Extract TOMBO sub-images
         # =========================
 
-        patches = extract_fractional_patches(x, self.offsets)
-        # [B, N, C, H, W]
+        psf_radius = self.kernel_size // 2
+
+        patches = extract_fractional_patches(x, self.offsets, psf_radius)
+        # [B, N, C, H+2p, W+2p]
+
+        patch_h = h + 2 * psf_radius
+        patch_w = w + 2 * psf_radius
+
+        assert patches.shape == (b, num_units, c, patch_h, patch_w)
 
         # =========================
         # Optical aberration
         # =========================
 
-        kernel_size = self.kernel_size
-        padding = kernel_size // 2
+        # [B, N, C, H+2p, W+2p] -> [B*N, C, H+2p, W+2p]
+        optical_input = patches.reshape(b * num_units, c, patch_h, patch_w)
 
-        # Expand the shared PSFs to all patches.
-        #
-        # [C, K, K] -> [B*N*C, 1, K, K]
+        # Shared PSFs:
+        # [C, K, K] -> [C, 1, K, K]
 
         weights = (
             self.psfs
             .to(device=x.device, dtype=x.dtype)
-            .unsqueeze(0).unsqueeze(0)
-            .expand(b, num_units, c, kernel_size, kernel_size)
-            .reshape(b * num_units * c, 1, kernel_size, kernel_size)
-        )
-
-        # Treat every patch/channel combination as
-        # an independent convolution channel.
-
-        optical_input = patches.reshape(b * num_units, c, h, w)
-
-        weights = self.psfs.to(device=x.device, dtype=x.dtype, ).unsqueeze(1)
-
-        optical_input = F.pad(
-            optical_input,
-            (padding, padding, padding, padding),
-            mode="reflect",
+            .unsqueeze(1)
         )
 
         optical_output = F.conv2d(
             optical_input,
             weights.flip((-2, -1)),
             groups=c,
+            padding=0,
         )
+
+        # Result:
+        # [B*N, C, H, W]
+
+        assert optical_output.shape[-2:] == (h, w)
 
         patches = optical_output.reshape(b, num_units, c, h, w)
 
