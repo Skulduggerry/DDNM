@@ -59,8 +59,8 @@ def generate_tombo_psfs(
         channels,
         kernel_size,
         psf_grid_resolution=256,
-        model="geometric",
-        spp=16384,
+        model="coherent",
+        spp=2*20,
         device="cuda",
 ):
     assert kernel_size % 2 == 1
@@ -198,8 +198,8 @@ class TOMBOForwardOperator:
                  lens_file="./lenses/cellphone80deg.json",
                  device="cuda",
                  dtype=torch.float32,
-                 model="geometric",
-                 spp=16384):
+                 model="coherent",
+                 spp=2*20):
         self.device = device
         self.dtype = dtype
 
