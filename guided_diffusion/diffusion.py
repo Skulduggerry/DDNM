@@ -1,5 +1,6 @@
 import os
 import random
+import math
 
 import numpy as np
 import torch
@@ -117,7 +118,7 @@ def generate_tombo_psfs(
     return torch.stack(psfs).float()
 
 
-def extract_fractional_patches(x, offsets):
+def extract_fractional_patches(x, offsets, psf_radius):
     b, c, h, w = x.shape
 
     if h <= 1 or w <= 1:
@@ -125,25 +126,34 @@ def extract_fractional_patches(x, offsets):
 
     offsets = offsets.to(device=x.device, dtype=x.dtype)
 
+    max_offset = math.ceil(offsets.abs().max().item())
+    margin = psf_radius + max_offset
+
+    x_padded = F.pad(x, (margin, margin, margin, margin), mode="constant", value=0.0)
+
+    hp, wp = x_padded.shape[-2:]
+
     yy, xx = torch.meshgrid(
-        torch.arange(h, device=x.device, dtype=x.dtype),
-        torch.arange(w, device=x.device, dtype=x.dtype),
+        torch.arange(-psf_radius, h + psf_radius, device=x.device, dtype=x.dtype),
+        torch.arange(-psf_radius, w + psf_radius, device=x.device, dtype=x.dtype),
         indexing="ij",
     )
 
     patches = []
 
     for dy, dx in offsets:
-        gx = xx + dx
-        gy = yy + dy
+        gx = xx + dx + margin
+        gy = yy + dy + margin
 
-        gx = 2.0 * gx / (w - 1) - 1.0
-        gy = 2.0 * gy / (h - 1) - 1.0
+        gx = 2.0 * gx / (wp - 1) - 1.0
+        gy = 2.0 * gy / (hp - 1) - 1.0
 
         grid = torch.stack([gx, gy], dim=-1)
+
         grid = grid.unsqueeze(0).expand(b, -1, -1, -1)
 
-        patch = F.grid_sample(x, grid, mode="bilinear", padding_mode="reflection", align_corners=True)
+        patch = F.grid_sample(x_padded, grid, mode="bilinear", padding_mode="zeros", align_corners=True)
+
         patches.append(patch)
 
     return torch.stack(patches, dim=1)
@@ -229,12 +239,11 @@ class TOMBOForwardOperator:
         # =========================
 
         offsets = [
-            (row * self.shift, col * self.shift)
+            (row - (self.repeat_cnt - 1) / 2, col - (self.repeat_cnt - 1) / 2,)
             for row in range(self.repeat_cnt)
             for col in range(self.repeat_cnt)
         ]
-        offsets = torch.tensor(offsets, dtype=torch.float32, device=device)
-        self.offsets = offsets
+        self.offsets = torch.tensor(offsets, dtype=torch.float32, device=device) * self.shift
 
         # =========================
         # Generate shared PSFs
@@ -276,7 +285,7 @@ class TOMBOForwardOperator:
         print("TOMBO operator initialized:")
         print("  Input size:", self.image_size)
         print("  Number of units:", num_units)
-        print("  Patch size:", self.image_size)
+        print("  Extracted patch size:", self.image_size + 2 * (self.kernel_size // 2))
         print("  Sensor output per unit:", self.lens_out_size)
         print("  Downsampling factor:", self.downsample_factor)
         print("  PSF shape:", tuple(self.psfs.shape))
