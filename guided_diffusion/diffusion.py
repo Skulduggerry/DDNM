@@ -129,7 +129,7 @@ def extract_fractional_patches(x, offsets, psf_radius):
     max_offset = math.ceil(offsets.abs().max().item())
     margin = psf_radius + max_offset
 
-    x_padded = F.pad(x, (margin, margin, margin, margin), mode="constant", value=0.0)
+    x_padded = F.pad(x, (margin, margin, margin, margin), mode="reflect")
 
     hp, wp = x_padded.shape[-2:]
 
@@ -152,7 +152,7 @@ def extract_fractional_patches(x, offsets, psf_radius):
 
         grid = grid.unsqueeze(0).expand(b, -1, -1, -1)
 
-        patch = F.grid_sample(x_padded, grid, mode="bilinear", padding_mode="zeros", align_corners=True)
+        patch = F.grid_sample(x_padded, grid, mode="bilinear", padding_mode="reflection", align_corners=True)
 
         patches.append(patch)
 

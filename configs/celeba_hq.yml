@@ -2,7 +2,7 @@ ddnm:
     output_size: 256
     repeat_cnt: 4
     shift: 1
-    kernel_size: 11
+    kernel_size: 31
 
     cg_rtol: 1e-5
     cg_rho: 2e-2
