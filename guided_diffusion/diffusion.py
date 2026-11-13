@@ -60,7 +60,7 @@ def generate_tombo_psfs(
         kernel_size,
         psf_grid_resolution=256,
         model="coherent",
-        spp=2*20,
+        spp=2**20,
         device="cuda",
 ):
     assert kernel_size % 2 == 1
@@ -199,7 +199,7 @@ class TOMBOForwardOperator:
                  device="cuda",
                  dtype=torch.float32,
                  model="coherent",
-                 spp=2*20):
+                 spp=2**20):
         self.device = device
         self.dtype = dtype
 
