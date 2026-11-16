@@ -334,7 +334,7 @@ class TOMBOForwardOperator:
 
         margin = self.sampling_margin
 
-        x_padded = F.pad(x, (margin, margin, margin, margin), mode="reflection")
+        x_padded = F.pad(x, (margin, margin, margin, margin), mode="reflect")
 
         # Extract all lens patches simultaneously.
         patches = extract_fractional_patches(x_padded, self.sampling_grid.to(device=x.device, dtype=x.dtype))
