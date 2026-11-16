@@ -118,45 +118,35 @@ def generate_tombo_psfs(
     return torch.stack(psfs).float()
 
 
-def extract_fractional_patches(x, offsets, psf_radius):
+def extract_fractional_patches(x, sampling_grid):
     b, c, h, w = x.shape
+    num_units, patch_h, patch_w, _ = sampling_grid.shape
 
-    if h <= 1 or w <= 1:
-        raise ValueError("Image dimensions must exceed 1.")
-
-    offsets = offsets.to(device=x.device, dtype=x.dtype)
-
-    max_offset = math.ceil(offsets.abs().max().item())
-    margin = psf_radius + max_offset
-
-    x_padded = F.pad(x, (margin, margin, margin, margin), mode="reflect")
-
-    hp, wp = x_padded.shape[-2:]
-
-    yy, xx = torch.meshgrid(
-        torch.arange(-psf_radius, h + psf_radius, device=x.device, dtype=x.dtype),
-        torch.arange(-psf_radius, w + psf_radius, device=x.device, dtype=x.dtype),
-        indexing="ij",
+    # Duplicate the input across the lens dimension.
+    optical_input = (
+        x.unsqueeze(1)
+        .expand(-1, num_units, -1, -1, -1)
+        .reshape(b * num_units, c, h, w)
     )
 
-    patches = []
+    # One grid per lens, shared across batch elements.
+    grid = (
+        sampling_grid
+        .unsqueeze(0)
+        .expand(b, -1, -1, -1, -1)
+        .reshape(b * num_units, patch_h, patch_w, 2)
+    )
 
-    for dy, dx in offsets:
-        gx = xx + dx + margin
-        gy = yy + dy + margin
+    # One batched GPU operation for all lens units.
+    patches = F.grid_sample(
+        optical_input,
+        grid,
+        mode="bilinear",
+        padding_mode="reflect",
+        align_corners=True,
+    )
 
-        gx = 2.0 * gx / (wp - 1) - 1.0
-        gy = 2.0 * gy / (hp - 1) - 1.0
-
-        grid = torch.stack([gx, gy], dim=-1)
-
-        grid = grid.unsqueeze(0).expand(b, -1, -1, -1)
-
-        patch = F.grid_sample(x_padded, grid, mode="bilinear", padding_mode="reflection", align_corners=True)
-
-        patches.append(patch)
-
-    return torch.stack(patches, dim=1)
+    return patches.reshape(b, num_units, c, patch_h, patch_w)
 
 
 def cg(A_op, b, rtol, max_iter):
@@ -246,6 +236,42 @@ class TOMBOForwardOperator:
         self.offsets = torch.tensor(offsets, dtype=torch.float32, device=device) * self.shift
 
         # =========================
+        # Precompute sampling grid
+        # =========================
+
+        self.psf_radius = self.kernel_size // 2
+
+        # Maximum displacement in either direction.
+        max_offset = math.ceil(max(abs(v) for pair in offsets for v in pair))
+
+        # Include both convolution and sampling margins.
+        self.sampling_margin = self.psf_radius + max_offset
+
+        margin = self.sampling_margin
+        p = self.psf_radius
+
+        # Padded input dimensions.
+        padded_h = self.image_size + 2 * margin
+        padded_w = self.image_size + 2 * margin
+
+        # Coordinates of the enlarged output patches.
+        yy, xx = torch.meshgrid(
+            torch.arange(-p, self.image_size + p, dtype=torch.float32, device=device),
+            torch.arange(-p, self.image_size + p, dtype=torch.float32, device=device),
+            indexing="ij",
+        )
+
+        # Generate one grid per lens.
+        grid_x = xx.unsqueeze(0) + self.offsets[:, 1, None, None] + margin
+        grid_y = yy.unsqueeze(0) + self.offsets[:, 0, None, None] + margin
+
+        # Normalize coordinates for grid_sample.
+        grid_x = 2.0 * grid_x / (padded_w - 1) - 1.0
+        grid_y = 2.0 * grid_y / (padded_h - 1) - 1.0
+
+        self.sampling_grid = torch.stack([grid_x, grid_y], dim=-1)
+
+        # =========================
         # Generate shared PSFs
         # =========================
 
@@ -306,7 +332,12 @@ class TOMBOForwardOperator:
 
         psf_radius = self.kernel_size // 2
 
-        patches = extract_fractional_patches(x, self.offsets, psf_radius)
+        margin = self.sampling_margin
+
+        x_padded = F.pad(x, (margin, margin, margin, margin), mode="reflect")
+
+        # Extract all lens patches simultaneously.
+        patches = extract_fractional_patches(x_padded, self.sampling_grid.to(device=x.device, dtype=x.dtype))
         # [B, N, C, H+2p, W+2p]
 
         patch_h = h + 2 * psf_radius
