@@ -536,7 +536,6 @@ class Diffusion(object):
         self.simplified_ddnm_plus(model, cls_fn)
 
     def degradate(self, x_orig, A, Ap):
-        x_orig = data_transform(self.config, x_orig.to(self.device))
         y = A(x_orig)
 
         if self.args.add_noise:  # for denoising test
@@ -680,6 +679,7 @@ class Diffusion(object):
         ).to(self.device)
 
         for x_orig, classes in pbar:
+            x_orig = data_transform(self.config, x_orig.to(self.device))
             y, Apy = self.degradate(x_orig, A, Ap)
 
             x_restored = self.reverse(A, Ap, y, model)
