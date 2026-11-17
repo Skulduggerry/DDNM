@@ -680,7 +680,7 @@ class Diffusion(object):
         ).to(self.device)
 
         for x_orig, classes in pbar:
-            y, Apy = self.degradate(x_orig, A, Ap, args, config, idx_so_far)
+            y, Apy = self.degradate(x_orig, A, Ap)
 
             x_restored = self.reverse(A, Ap, y, model)
             x_restored = [inverse_data_transform(config, xi) for xi in x_restored]
