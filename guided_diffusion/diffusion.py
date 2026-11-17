@@ -855,8 +855,8 @@ class Diffusion:
 
         output_root = Path(self.args.image_folder).resolve()
         output_root.mkdir(parents=True, exist_ok=True)
-
         sample_index = 0
+        initial_index = sample_index
 
         print(f"Forward-only mode: saving pairs to {output_root}")
         with torch.no_grad():
@@ -881,7 +881,7 @@ class Diffusion:
                     )
                     sample_index += 1
 
-        print(f"Saved {sample_index} measurement/ground-truth pair(s).")
+        print(f"Saved {sample_index - initial_index} measurement/ground-truth pair(s).")
 
     def run_reverse(self, model, classifier_fn=None) -> None:
         """Load saved measurement/ground-truth pairs and reconstruct each one."""
@@ -1038,6 +1038,7 @@ class Diffusion:
         }
 
         sample_index = 0
+        initial_index = sample_index
 
         progress = tqdm.tqdm(test_loader, desc="TOMBO simulation")
         for images, _ in progress:
@@ -1106,9 +1107,14 @@ class Diffusion:
             )
 
             sample_index += 1
+            completed = sample_index - initial_index
             progress.set_postfix(
-                lpips=f"{totals['Reconstructed']['lpips'] / sample_index:.4f}"
+                lpips=f"{totals['Reconstructed']['lpips'] / completed:.4f}"
             )
+
+        sample_count = sample_index - initial_index
+        if sample_count == 0:
+            raise RuntimeError("The selected dataset subset contained no samples.")
 
         averages = {
             section: {
