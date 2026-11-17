@@ -525,7 +525,6 @@ class Diffusion:
             f"{self.config.time_travel.T_sampling} sampling steps; "
             f"travel_length={self.config.time_travel.travel_length}; "
             f"travel_repeat={self.config.time_travel.travel_repeat}. "
-            f"Task: {self.args.deg}."
         )
 
         if mode == "reverse":
