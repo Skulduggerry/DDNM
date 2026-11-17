@@ -855,8 +855,7 @@ class Diffusion:
 
         output_root = Path(self.args.image_folder).resolve()
         output_root.mkdir(parents=True, exist_ok=True)
-        sample_index = int(self.args.subset_start)
-        initial_index = sample_index
+        initial_index = 0
 
         print(f"Forward-only mode: saving pairs to {output_root}")
         with torch.no_grad():
@@ -1037,8 +1036,7 @@ class Diffusion:
             "Apy": {name: 0.0 for name in metric_names},
         }
 
-        sample_index = int(self.args.subset_start)
-        initial_index = sample_index
+        initial_index = 0
 
         progress = tqdm.tqdm(test_loader, desc="TOMBO simulation")
         for images, _ in progress:
