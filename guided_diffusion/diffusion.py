@@ -535,10 +535,94 @@ class Diffusion(object):
               )
         self.simplified_ddnm_plus(model, cls_fn)
 
+    def degradate(self, x_orig, A, Ap):
+        x_orig = data_transform(self.config, x_orig.to(self.device))
+        y = A(x_orig)
+
+        if self.args.add_noise:  # for denoising test
+            y = get_gaussian_noisy_img(y, self.args.sigma_y)
+
+        Apy = Ap(y)
+        return y, Apy
+
+    def reverse(self, A, Ap, y, model):
+        args, config = self.args, self.config
+        sigma_y = args.sigma_y
+
+        # init x_T
+        x = torch.randn(
+            y.shape[0],
+            config.data.channels,
+            config.data.image_size,
+            config.data.image_size,
+            device=self.device,
+        )
+
+        with torch.no_grad():
+            skip = config.diffusion.num_diffusion_timesteps // config.time_travel.T_sampling
+            n = x.size(0)
+            x0_preds = []
+            xs = [x]
+
+            times = get_schedule_jump(config.time_travel.T_sampling,
+                                      config.time_travel.travel_length,
+                                      config.time_travel.travel_repeat,
+                                      )
+            time_pairs = list(zip(times[:-1], times[1:]))
+
+            # reverse diffusion sampling
+            for i, j in tqdm.tqdm(time_pairs):
+                i, j = i * skip, j * skip
+                if j < 0: j = -1
+
+                if j < i:  # normal sampling
+                    t = (torch.ones(n) * i).to(x.device)
+                    next_t = (torch.ones(n) * j).to(x.device)
+                    at = compute_alpha(self.betas, t.long())
+                    at_next = compute_alpha(self.betas, next_t.long())
+                    xt = xs[-1].to('cuda')
+
+                    et = model(xt, t)
+
+                    if et.size(1) == 6:
+                        et = et[:, :3]
+
+                    # Eq. 12
+                    x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
+
+                    # Eq. 19
+                    sigma_t = (1 - at_next).sqrt()
+                    if sigma_t >= at_next * sigma_y:
+                        lambda_t = 1.
+                        gamma_t = (sigma_t ** 2 - (at_next * sigma_y) ** 2).sqrt()
+                    else:
+                        lambda_t = sigma_t / (at_next * sigma_y)
+                        gamma_t = 0.
+
+                    # Eq. 17
+                    eta = self.args.eta
+                    x0_t_hat = x0_t - lambda_t * Ap(A(x0_t) - y)
+                    xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (
+                            eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
+
+                    x0_preds.append(x0_t.to('cpu'))
+                    xs.append(xt_next.to('cpu'))
+                else:  # time-travel back
+                    next_t = (torch.ones(n) * j).to(x.device)
+                    at_next = compute_alpha(self.betas, next_t.long())
+                    x0_t = x0_preds[-1].to('cuda')
+
+                    xt_next = at_next.sqrt() * x0_t + torch.randn_like(x0_t) * (1 - at_next).sqrt()
+
+                    xs.append(xt_next.to('cpu'))
+
+        return xs[-1]
+
     def simplified_ddnm_plus(self, model, cls_fn):
+        self.args.sigma_y = 2 * self.args.sigma_y  # to account for scaling to [-1,1]
         args, config = self.args, self.config
 
-        dataset, test_dataset = get_dataset(args, config)
+        _, test_dataset = get_dataset(args, config)
 
         if args.subset_start >= 0 and args.subset_end > 0:
             assert args.subset_end > args.subset_start
@@ -574,8 +658,6 @@ class Diffusion(object):
         else:
             raise NotImplementedError("degradation type not supported")
 
-        args.sigma_y = 2 * args.sigma_y  # to account for scaling to [-1,1]
-        sigma_y = args.sigma_y
 
         print(f'Start from {args.subset_start}')
         idx_init = args.subset_start
@@ -598,131 +680,31 @@ class Diffusion(object):
         ).to(self.device)
 
         for x_orig, classes in pbar:
-            x_orig = x_orig.to(self.device)
-            x_orig = x_orig.to(self.device)
-            x_orig = data_transform(self.config, x_orig)
+            y, Apy = self.degradate(x_orig, A, Ap, args, config, idx_so_far)
 
-            y = A(x_orig)
-
-            if self.args.add_noise:  # for denoising test
-                y = get_gaussian_noisy_img(y, sigma_y)
-
-            if config.sampling.batch_size != 1:
-                raise ValueError("please change the config file to set batch size as 1")
-
-            Apy = Ap(y)
+            x_restored = self.reverse(A, Ap, y, model)
+            x_restored = [inverse_data_transform(config, xi) for xi in x_restored]
 
             os.makedirs(os.path.join(self.args.image_folder, f"{idx_so_far}"), exist_ok=True)
-            for i in range(len(Apy)):
-                tvu.save_image(
-                    inverse_data_transform(config, y[i]),
-                    os.path.join(self.args.image_folder, f"{idx_so_far}/y.png")
-                )
-                tvu.save_image(
-                    inverse_data_transform(config, Apy[i]),
-                    os.path.join(self.args.image_folder, f"{idx_so_far}/Apy.png")
-                )
-                tvu.save_image(
-                    inverse_data_transform(config, x_orig[i]),
-                    os.path.join(self.args.image_folder, f"{idx_so_far}/orig.png")
-                )
-
-            # init x_T
-            x = torch.randn(
-                y.shape[0],
-                config.data.channels,
-                config.data.image_size,
-                config.data.image_size,
-                device=self.device,
-            )
-
-            with torch.no_grad():
-                skip = config.diffusion.num_diffusion_timesteps // config.time_travel.T_sampling
-                n = x.size(0)
-                x0_preds = []
-                xs = [x]
-
-                times = get_schedule_jump(config.time_travel.T_sampling,
-                                          config.time_travel.travel_length,
-                                          config.time_travel.travel_repeat,
-                                          )
-                time_pairs = list(zip(times[:-1], times[1:]))
-
-                # reverse diffusion sampling
-                for i, j in tqdm.tqdm(time_pairs):
-                    i, j = i * skip, j * skip
-                    if j < 0: j = -1
-
-                    if j < i:  # normal sampling
-                        t = (torch.ones(n) * i).to(x.device)
-                        next_t = (torch.ones(n) * j).to(x.device)
-                        at = compute_alpha(self.betas, t.long())
-                        at_next = compute_alpha(self.betas, next_t.long())
-                        xt = xs[-1].to('cuda')
-
-                        et = model(xt, t)
-
-                        if et.size(1) == 6:
-                            et = et[:, :3]
-
-                        # Eq. 12
-                        x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
-
-                        # Eq. 19
-                        sigma_t = (1 - at_next).sqrt()
-                        if sigma_t >= at_next * sigma_y:
-                            lambda_t = 1.
-                            gamma_t = (sigma_t ** 2 - (at_next * sigma_y) ** 2).sqrt()
-                        else:
-                            lambda_t = sigma_t / (at_next * sigma_y)
-                            gamma_t = 0.
-
-                        # Eq. 17
-                        eta = self.args.eta
-                        x0_t_hat = x0_t - lambda_t * Ap(A(x0_t) - y)
-                        xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (
-                                eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
-
-                        x0_preds.append(x0_t.to('cpu'))
-                        xs.append(xt_next.to('cpu'))
-
-                        if i % 100 == 0:
-                            os.makedirs(f"{self.args.image_folder}/debug_ddnm/x0_t/", exist_ok=True)
-                            tvu.save_image(
-                                inverse_data_transform(config, x0_t[0]),
-                                f"{self.args.image_folder}/debug_ddnm/x0_t/x0_t_{i:04d}.png"
-                            )
-
-                            os.makedirs(f"{self.args.image_folder}/debug_ddnm/x0_t_hat/", exist_ok=True)
-                            tvu.save_image(
-                                inverse_data_transform(config, x0_t_hat[0]),
-                                f"{self.args.image_folder}/debug_ddnm/x0_t_hat/x0_t_hat_{i:04d}.png"
-                            )
-
-                            os.makedirs(f"{self.args.image_folder}/debug_ddnm/xt_next/", exist_ok=True)
-                            tvu.save_image(
-                                inverse_data_transform(config, xt_next[0]),
-                                f"{self.args.image_folder}/debug_ddnm/xt_next/xt_next_{i:04d}.png"
-                            )
-                    else:  # time-travel back
-                        next_t = (torch.ones(n) * j).to(x.device)
-                        at_next = compute_alpha(self.betas, next_t.long())
-                        x0_t = x0_preds[-1].to('cuda')
-
-                        xt_next = at_next.sqrt() * x0_t + torch.randn_like(x0_t) * (1 - at_next).sqrt()
-
-                        xs.append(xt_next.to('cpu'))
-
-                x = xs[-1]
-
-            x = [inverse_data_transform(config, xi) for xi in x]
-
             tvu.save_image(
-                x[0], os.path.join(self.args.image_folder, f"{idx_so_far}/ddnm.png")
+                inverse_data_transform(config, y[0]),
+                os.path.join(self.args.image_folder, f"{idx_so_far}/y.png")
+            )
+            tvu.save_image(
+                inverse_data_transform(config, Apy[0]),
+                os.path.join(self.args.image_folder, f"{idx_so_far}/Apy.png")
+            )
+            tvu.save_image(
+                inverse_data_transform(config, x_orig[0]),
+                os.path.join(self.args.image_folder, f"{idx_so_far}/orig.png")
+            )
+            tvu.save_image(
+                x_restored[0],
+                os.path.join(self.args.image_folder, f"{idx_so_far}/ddnm.png")
             )
 
             orig = inverse_data_transform(config, x_orig[0])[:, 4:252, 4:252].unsqueeze(0).to(self.device)
-            reconstructed = x[0][:, 4:252, 4:252].unsqueeze(0).to(self.device)
+            reconstructed = x_restored[0][:, 4:252, 4:252].unsqueeze(0).to(self.device)
             diff = reconstructed - orig
 
             Apy = inverse_data_transform(config, Apy[0])[:, 4:252, 4:252].unsqueeze(0).to(self.device)
@@ -747,8 +729,7 @@ class Diffusion(object):
             avg_norm_error_Apy += norm_error_Apy
 
             with open(os.path.join(self.args.image_folder, f"{idx_so_far}/errors.txt"), mode='w') as f:
-                f.write(f"""
-                Reconstructed:
+                f.write(f"""Reconstructed:
                 MSE={mse}
                 PSNR={psnr}
                 LPIPS={lpips}
@@ -775,8 +756,7 @@ class Diffusion(object):
         avg_norm_error_Apy /= (idx_so_far - idx_init)
 
         with open(os.path.join(self.args.image_folder, f"errors.txt"), mode='w') as f:
-            f.write(f"""
-            Reconstructed:
+            f.write(f"""Reconstructed:
             Total Average MSE={avg_mse}
             Total Average PSNR={avg_psnr}
             Total Average LPIPS={avg_lpips}

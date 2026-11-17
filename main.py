@@ -13,6 +13,7 @@ from guided_diffusion.diffusion import Diffusion
 
 torch.set_printoptions(sci_mode=False)
 
+
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 def parse_args_and_config():
@@ -39,12 +40,12 @@ def parse_args_and_config():
     )
     parser.add_argument(
         "--eta", type=float, default=0.85, help="Eta"
-    )    
+    )
     parser.add_argument(
         "--simplified",
         action="store_true",
         help="Use simplified DDNM, without SVD",
-    )    
+    )
     parser.add_argument(
         "-i",
         "--image_folder",
@@ -54,7 +55,7 @@ def parse_args_and_config():
     )
     parser.add_argument(
         "--deg_scale", type=float, default=0., help="deg_scale"
-    )    
+    )
     parser.add_argument(
         "--verbose",
         type=str,
@@ -83,8 +84,12 @@ def parse_args_and_config():
         "--add_noise",
         action="store_true"
     )
-
-    
+    parser.add_argument(
+        '--mode',
+        type=str,
+        default='simulate',
+        help='simulate | forward | reverse'
+    )
 
     args = parser.parse_args()
 
