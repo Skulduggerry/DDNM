@@ -1,6 +1,8 @@
+import math
 import os
 import random
-import math
+from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import torch
@@ -10,77 +12,107 @@ import torchvision.utils as tvu
 import tqdm
 from deeplens import GeoLens
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+from torchvision.io import read_image
 
-from datasets import get_dataset, data_transform, inverse_data_transform
-from functions.ckpt_util import get_ckpt_path, download
+from datasets import data_transform, get_dataset, inverse_data_transform
+from functions.ckpt_util import download, get_ckpt_path
 from guided_diffusion.models import Model
-from guided_diffusion.script_util import create_model, create_classifier, classifier_defaults, args_to_dict
+from guided_diffusion.script_util import args_to_dict, classifier_defaults, create_classifier, create_model
+
+DEFAULT_LENS_FILE = "./lenses/cellphone80deg.json"
+VALID_MODES = {"simulate", "forward", "reverse"}
 
 
-def get_gaussian_noisy_img(img, noise_level):
-    return img + torch.randn_like(img).cuda() * noise_level
+# -----------------------------------------------------------------------------
+# Diffusion and image utilities
+# -----------------------------------------------------------------------------
 
 
-def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_timesteps):
-    def sigmoid(x):
-        return 1 / (np.exp(-x) + 1)
+def get_gaussian_noisy_img(img: torch.Tensor, noise_level: float) -> torch.Tensor:
+    return img + torch.randn_like(img) * noise_level
+
+
+def get_beta_schedule(beta_schedule: str, *, beta_start: float, beta_end: float,
+                      num_diffusion_timesteps: int, ) -> np.ndarray:
+    """Create the beta schedule used by the diffusion process."""
+
+    def sigmoid(x: np.ndarray) -> np.ndarray:
+        return 1.0 / (np.exp(-x) + 1.0)
 
     if beta_schedule == "quad":
-        betas = (
-                np.linspace(
-                    beta_start ** 0.5,
-                    beta_end ** 0.5,
-                    num_diffusion_timesteps,
-                    dtype=np.float64,
-                )
-                ** 2
-        )
+        betas = np.linspace(
+            beta_start ** 0.5,
+            beta_end ** 0.5,
+            num_diffusion_timesteps,
+            dtype=np.float64,
+        ) ** 2
     elif beta_schedule == "linear":
         betas = np.linspace(
-            beta_start, beta_end, num_diffusion_timesteps, dtype=np.float64
+            beta_start,
+            beta_end,
+            num_diffusion_timesteps,
+            dtype=np.float64,
         )
     elif beta_schedule == "const":
         betas = beta_end * np.ones(num_diffusion_timesteps, dtype=np.float64)
     elif beta_schedule == "jsd":
         betas = 1.0 / np.linspace(
-            num_diffusion_timesteps, 1, num_diffusion_timesteps, dtype=np.float64
+            num_diffusion_timesteps,
+            1,
+            num_diffusion_timesteps,
+            dtype=np.float64,
         )
     elif beta_schedule == "sigmoid":
-        betas = np.linspace(-6, 6, num_diffusion_timesteps)
-        betas = sigmoid(betas) * (beta_end - beta_start) + beta_start
+        steps = np.linspace(-6.0, 6.0, num_diffusion_timesteps)
+        betas = sigmoid(steps) * (beta_end - beta_start) + beta_start
     else:
-        raise NotImplementedError(beta_schedule)
-    assert betas.shape == (num_diffusion_timesteps,)
+        raise NotImplementedError(f"Unknown beta schedule: {beta_schedule}")
+
+    if betas.shape != (num_diffusion_timesteps,):
+        raise RuntimeError("Generated beta schedule has an unexpected shape.")
     return betas
 
 
-def generate_tombo_psfs(
-        lens_file,
-        channels,
-        kernel_size,
-        psf_grid_resolution=256,
-        model="coherent",
-        spp=None,
-        device="cuda",
-):
-    assert kernel_size % 2 == 1
+def compute_alpha(beta: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
+    """Compute cumulative alpha values for a batch of diffusion timesteps."""
+    beta_with_zero = torch.cat([beta.new_zeros(1), beta], dim=0)
+    alpha_bar = (1.0 - beta_with_zero).cumprod(dim=0)
+    return alpha_bar.index_select(0, timestep + 1).view(-1, 1, 1, 1)
 
-    # Load the optical system.
+
+# -----------------------------------------------------------------------------
+# TOMBO optical model
+# -----------------------------------------------------------------------------
+
+
+def generate_tombo_psfs(
+        lens_file: str,
+        channels: int,
+        kernel_size: int,
+        psf_grid_resolution: int = 256,
+        model: str = "coherent",
+        spp: int | None = None,
+        device: torch.device | str = "cuda",
+) -> torch.Tensor:
+    """Generate normalized, channel-specific intensity PSFs with DeepLens."""
+    if kernel_size <= 0 or kernel_size % 2 != 1:
+        raise ValueError("kernel_size must be a positive odd integer.")
+
+    wavelengths_by_channel = {
+        1: [0.588],
+        3: [0.656, 0.588, 0.486],
+    }
+    if channels not in wavelengths_by_channel:
+        raise ValueError(f"Unsupported channel count for PSF generation: {channels}")
+
     lens = GeoLens(
         filename=lens_file,
         device=device,
         dtype=torch.float64,
     )
-
     lens.set_sensor_res((psf_grid_resolution, psf_grid_resolution))
 
-    wavelengths = {
-        1: [0.588],
-        3: [0.656, 0.588, 0.486],
-    }[channels]
-
-    # All lenses are identical and centered.
-    # Therefore, all use the same central field point.
+    # Current TOMBO setup assumes identical, centered lens units.
     field_point = torch.tensor(
         [0.0, 0.0, -10000.0],
         device=device,
@@ -88,11 +120,8 @@ def generate_tombo_psfs(
     )
 
     psfs = []
-
     with torch.no_grad():
-
-        for wavelength in wavelengths:
-
+        for wavelength in wavelengths_by_channel[channels]:
             psf = lens.psf(
                 points=field_point,
                 ks=kernel_size,
@@ -101,329 +130,352 @@ def generate_tombo_psfs(
                 spp=spp,
                 recenter=True,
             )
-
             psf = psf.clamp_min(0.0)
             psf_sum = psf.sum()
 
             if not torch.isfinite(psf_sum) or psf_sum <= 1e-12:
-                raise RuntimeError(
-                    f"Invalid PSF for wavelength {wavelength}"
-                )
+                raise RuntimeError(f"Invalid PSF for wavelength {wavelength}.")
 
-            # Normalize the intensity kernel.
-            psf = psf / psf_sum
-
-            psfs.append(psf)
+            psfs.append(psf / psf_sum)
 
     return torch.stack(psfs).float()
 
 
-def extract_fractional_patches(x, sampling_grid):
-    b, c, h, w = x.shape
+def extract_fractional_patches(x: torch.Tensor, sampling_grid: torch.Tensor) -> torch.Tensor:
+    """Extract all fractionally shifted lens patches in one grid_sample call.
+
+    Args:
+        x: Input tensor with shape [B, C, H, W].
+        sampling_grid: Sampling grids with shape [N, H_out, W_out, 2].
+
+    Returns:
+        Tensor with shape [B, N, C, H_out, W_out].
+    """
+    batch_size, channels, height, width = x.shape
     num_units, patch_h, patch_w, _ = sampling_grid.shape
 
-    # Duplicate the input across the lens dimension.
-    optical_input = (
+    # Expand each input over the lens dimension, then flatten B and N.
+    lens_inputs = (
         x.unsqueeze(1)
         .expand(-1, num_units, -1, -1, -1)
-        .reshape(b * num_units, c, h, w)
+        .reshape(batch_size * num_units, channels, height, width)
+    )
+    lens_grids = (
+        sampling_grid.unsqueeze(0)
+        .expand(batch_size, -1, -1, -1, -1)
+        .reshape(batch_size * num_units, patch_h, patch_w, 2)
     )
 
-    # One grid per lens, shared across batch elements.
-    grid = (
-        sampling_grid
-        .unsqueeze(0)
-        .expand(b, -1, -1, -1, -1)
-        .reshape(b * num_units, patch_h, patch_w, 2)
-    )
-
-    # One batched GPU operation for all lens units.
     patches = F.grid_sample(
-        optical_input,
-        grid,
+        lens_inputs,
+        lens_grids,
         mode="bilinear",
         padding_mode="reflection",
         align_corners=True,
     )
+    return patches.reshape(batch_size, num_units, channels, patch_h, patch_w)
 
-    return patches.reshape(b, num_units, c, patch_h, patch_w)
 
+def cg(
+        operator: Callable[[torch.Tensor], torch.Tensor],
+        rhs: torch.Tensor,
+        rtol: float,
+        max_iter: int,
+) -> torch.Tensor:
+    """Solve a symmetric positive-semidefinite linear system with CG."""
+    solution = torch.zeros_like(rhs)
+    residual = rhs.clone()
+    direction = residual.clone()
 
-def cg(A_op, b, rtol, max_iter):
-    x = torch.zeros_like(b)
-    r = b.clone()
-    p = r.clone()
+    residual_sq = torch.sum(residual * residual)
+    rhs_norm = torch.linalg.vector_norm(rhs).clamp_min(1e-12)
 
-    rsold = torch.sum(r * r)
-    bnorm = torch.linalg.vector_norm(b).clamp_min(1e-12)
+    for _ in range(max_iter):
+        operator_direction = operator(direction)
+        denominator = torch.sum(direction * operator_direction)
 
-    for i in range(max_iter):
-        Ap = A_op(p)
-        denom = torch.sum(p * Ap)
-
-        if not torch.isfinite(denom) or denom <= 1e-20:
+        if not torch.isfinite(denominator) or denominator <= 1e-20:
             break
 
-        alpha = rsold / denom
-        x = x + alpha * p
-        r = r - alpha * Ap
+        step_size = residual_sq / denominator
+        solution = solution + step_size * direction
+        residual = residual - step_size * operator_direction
 
-        if torch.linalg.vector_norm(r) / bnorm < rtol:
+        if torch.linalg.vector_norm(residual) / rhs_norm < rtol:
             break
 
-        rsnew = torch.sum(r * r)
-        if not torch.isfinite(rsnew):
+        new_residual_sq = torch.sum(residual * residual)
+        if not torch.isfinite(new_residual_sq):
             break
 
-        p = r + (rsnew / rsold.clamp_min(1e-30)) * p
-        rsold = rsnew
+        direction = residual + (
+                new_residual_sq / residual_sq.clamp_min(1e-30)
+        ) * direction
+        residual_sq = new_residual_sq
 
-    return x
+    return solution
 
 
 class TOMBOForwardOperator:
-    def __init__(self,
-                 config,
-                 has_noise,
-                 lens_file="./lenses/cellphone80deg.json",
-                 device="cuda",
-                 dtype=torch.float32,
-                 model="coherent",
-                 spp=None):
-        self.device = device
+    """Linear TOMBO degradation operator and CG-based regularized inverse.
+
+    The current implementation uses one shared PSF per color channel for all
+    lens units. The lens dimension is retained explicitly in the patch and
+    convolution tensors so per-lens PSFs can be introduced later.
+    """
+
+    def __init__(
+            self,
+            config,
+            has_noise: bool,
+            lens_file: str = DEFAULT_LENS_FILE,
+            device: torch.device | str = "cuda",
+            dtype: torch.dtype = torch.float32,
+            model: str = "coherent",
+            spp: int | None = None,
+            build_pinv: bool = True,
+    ) -> None:
+        self.device = torch.device(device)
         self.dtype = dtype
 
         self.repeat_cnt = int(config.ddnm.repeat_cnt)
         self.shift = float(config.ddnm.shift)
-
         self.output_size = int(config.ddnm.output_size)
         self.image_size = int(config.data.image_size)
-
         self.channels = int(config.data.channels)
         self.kernel_size = int(config.ddnm.kernel_size)
 
-        num_units = self.repeat_cnt ** 2
-
-        # Output dimensions of one lens unit.
+        self._validate_config()
+        self.num_units = self.repeat_cnt ** 2
         self.lens_out_size = self.output_size // self.repeat_cnt
+        self.downsample_factor = self.image_size // self.lens_out_size
 
-        assert self.lens_out_size * self.repeat_cnt == self.output_size
+        self.cg_rtol = float(config.ddnm.cg_rtol)
+        self.cg_rho = float(config.ddnm.cg_rho) if has_noise else 0.0
+        self.cg_max_iter = int(config.ddnm.cg_max_iter)
+        if self.cg_rtol < 0 or self.cg_rho < 0 or self.cg_max_iter <= 0:
+            raise ValueError("Invalid CG settings in config.ddnm.")
 
-        # Exact integer downsampling factor.
-        assert self.image_size % self.lens_out_size == 0
-
-        self.downsample_factor = (self.image_size // self.lens_out_size)
-
-        assert self.kernel_size % 2 == 1
-
-        self.rtol = float(config.ddnm.cg_rtol)
-        self.rho = float(config.ddnm.cg_rho) if has_noise else 0
-        self.max_iter = int(config.ddnm.cg_max_iter)
-
-        assert self.rtol >= 0
-        assert self.rho >= 0
-        assert self.max_iter > 0
-
-        # =========================
-        # Sampling offsets
-        # =========================
-
-        offsets = [
-            (row - (self.repeat_cnt - 1) / 2, col - (self.repeat_cnt - 1) / 2,)
-            for row in range(self.repeat_cnt)
-            for col in range(self.repeat_cnt)
-        ]
-        self.offsets = torch.tensor(offsets, dtype=torch.float32, device=device) * self.shift
-
-        # =========================
-        # Precompute sampling grid
-        # =========================
-
+        self.offsets = self._make_offsets()
         self.psf_radius = self.kernel_size // 2
+        self.max_offset = math.ceil(abs(self.shift) * (self.repeat_cnt - 1) / 2.0)
+        self.sampling_margin = self.psf_radius + self.max_offset
+        if self.sampling_margin >= self.image_size:
+            raise ValueError("The reflection-padding margin must be smaller than image_size.")
+        self.sampling_grid = self._make_sampling_grid()
 
-        # Maximum displacement in either direction.
-        max_offset = math.ceil(max(abs(v) for pair in offsets for v in pair))
-
-        # Include both convolution and sampling margins.
-        self.sampling_margin = self.psf_radius + max_offset
-
-        margin = self.sampling_margin
-        p = self.psf_radius
-
-        # Padded input dimensions.
-        padded_h = self.image_size + 2 * margin
-        padded_w = self.image_size + 2 * margin
-
-        # Coordinates of the enlarged output patches.
-        yy, xx = torch.meshgrid(
-            torch.arange(-p, self.image_size + p, dtype=torch.float32, device=device),
-            torch.arange(-p, self.image_size + p, dtype=torch.float32, device=device),
-            indexing="ij",
-        )
-
-        # Generate one grid per lens.
-        grid_x = xx.unsqueeze(0) + self.offsets[:, 1, None, None] + margin
-        grid_y = yy.unsqueeze(0) + self.offsets[:, 0, None, None] + margin
-
-        # Normalize coordinates for grid_sample.
-        grid_x = 2.0 * grid_x / (padded_w - 1) - 1.0
-        grid_y = 2.0 * grid_y / (padded_h - 1) - 1.0
-
-        self.sampling_grid = torch.stack([grid_x, grid_y], dim=-1)
-
-        # =========================
-        # Generate shared PSFs
-        # =========================
-
-        psfs = generate_tombo_psfs(
+        # Current optical model: identical centered lens units, one PSF per color.
+        self.psfs = generate_tombo_psfs(
             lens_file=lens_file,
             channels=self.channels,
             kernel_size=self.kernel_size,
-            psf_grid_resolution=self.image_size,  # PSF is calculated at high resolution.
+            psf_grid_resolution=self.image_size,
             model=model,
             spp=spp,
-            device=device,
+            device=self.device,
         )
-
-        # Shape: [C, K, K]
-        self.psfs = psfs
-
-        assert self.psfs.shape == (
+        expected_psf_shape = (
             self.channels,
             self.kernel_size,
             self.kernel_size,
         )
+        if tuple(self.psfs.shape) != expected_psf_shape:
+            raise RuntimeError(f"Unexpected PSF shape {tuple(self.psfs.shape)}; expected {expected_psf_shape}.")
 
-        assert len(offsets) == num_units
+        self.forward_transpose = None
+        if build_pinv:
+            self._build_forward_transpose()
 
-        # =========================
-        # Generate pseudo inverse
-        # =========================
-        with torch.enable_grad():
-            x_template = torch.zeros(
-                (1, config.data.channels, config.data.image_size, config.data.image_size),
+        self._print_summary()
+
+    def _validate_config(self) -> None:
+        if self.repeat_cnt <= 0:
+            raise ValueError("repeat_cnt must be positive.")
+        if self.kernel_size <= 0 or self.kernel_size % 2 != 1:
+            raise ValueError("kernel_size must be a positive odd integer.")
+        if self.output_size % self.repeat_cnt != 0:
+            raise ValueError("output_size must be divisible by repeat_cnt.")
+
+        if self.output_size <= 0 or self.image_size <= 0:
+            raise ValueError("image_size and output_size must be positive.")
+        lens_out_size = self.output_size // self.repeat_cnt
+        if lens_out_size <= 0:
+            raise ValueError("output_size must be at least repeat_cnt.")
+        if self.image_size % lens_out_size != 0:
+            raise ValueError("image_size must be divisible by output_size / repeat_cnt.")
+        if self.channels not in (1, 3):
+            raise ValueError("The current TOMBO PSF generator supports 1 or 3 channels.")
+
+    def _make_offsets(self) -> torch.Tensor:
+        offsets = [(row - (self.repeat_cnt - 1) / 2.0, col - (self.repeat_cnt - 1) / 2.0)
+                   for row in range(self.repeat_cnt)
+                   for col in range(self.repeat_cnt)]
+        return torch.tensor(
+            offsets,
+            dtype=torch.float32,
+            device=self.device,
+        ) * self.shift
+
+    def _make_sampling_grid(self) -> torch.Tensor:
+        """Precompute the enlarged fractional sampling grid for each lens."""
+        margin = self.sampling_margin
+        radius = self.psf_radius
+        padded_size = self.image_size + 2 * margin
+
+        yy, xx = torch.meshgrid(
+            torch.arange(
+                -radius,
+                self.image_size + radius,
+                dtype=torch.float32,
                 device=self.device,
-                dtype=self.dtype,
-            )
-            _, vjp_fn = torch.func.vjp(lambda x: self.forward(x), x_template)
-            self.forward_transpose = lambda y: vjp_fn(y)[0]
+            ),
+            torch.arange(
+                -radius,
+                self.image_size + radius,
+                dtype=torch.float32,
+                device=self.device,
+            ),
+            indexing="ij",
+        )
 
+        grid_x = xx.unsqueeze(0) + self.offsets[:, 1, None, None] + margin
+        grid_y = yy.unsqueeze(0) + self.offsets[:, 0, None, None] + margin
+
+        grid_x = 2.0 * grid_x / (padded_size - 1) - 1.0
+        grid_y = 2.0 * grid_y / (padded_size - 1) - 1.0
+        return torch.stack([grid_x, grid_y], dim=-1)
+
+    def _build_forward_transpose(self) -> None:
+        """Build the VJP of the linear forward operator, i.e. its transpose."""
+        template = torch.zeros(
+            1,
+            self.channels,
+            self.image_size,
+            self.image_size,
+            device=self.device,
+            dtype=self.dtype,
+        )
+        with torch.enable_grad():
+            _, vjp_fn = torch.func.vjp(self.forward, template)
+        self.forward_transpose = lambda y: vjp_fn(y)[0]
+
+    def _print_summary(self) -> None:
         print("TOMBO operator initialized:")
-        print("  Input size:", self.image_size)
-        print("  Number of units:", num_units)
-        print("  Extracted patch size:", self.image_size + 2 * (self.kernel_size // 2))
-        print("  Sensor output per unit:", self.lens_out_size)
-        print("  Downsampling factor:", self.downsample_factor)
-        print("  PSF shape:", tuple(self.psfs.shape))
-        print("  Sampling offsets:", self.offsets.cpu().tolist())
+        print(f"  Input size: {self.image_size}")
+        print(f"  Number of units: {self.num_units}")
+        print(f"  Extracted patch size: {self.image_size + 2 * self.psf_radius}")
+        print(f"  Sensor output per unit: {self.lens_out_size}")
+        print(f"  Downsampling factor: {self.downsample_factor}")
+        print(f"  PSF shape: {tuple(self.psfs.shape)}")
+        print(f"  Sampling offsets: {self.offsets.cpu().tolist()}")
 
-    def forward(self, x):
-        b, c, h, w = x.shape
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply fractional shifts, PSF blur, sensor integration, and mosaicing."""
+        if x.ndim != 4:
+            raise ValueError(f"Expected BCHW input, got shape {tuple(x.shape)}.")
 
-        assert c == self.channels
-        assert h == self.image_size
-        assert w == self.image_size
-
-        num_units = self.repeat_cnt ** 2
-
-        # =========================
-        # Extract TOMBO sub-images
-        # =========================
-
-        psf_radius = self.kernel_size // 2
+        batch_size, channels, height, width = x.shape
+        expected_shape = (self.channels, self.image_size, self.image_size)
+        if (channels, height, width) != expected_shape:
+            raise ValueError(f"Expected input shape [B, {expected_shape}], got {tuple(x.shape)}.")
 
         margin = self.sampling_margin
-
         x_padded = F.pad(x, (margin, margin, margin, margin), mode="reflect")
+        sampling_grid = self.sampling_grid.to(device=x.device, dtype=x.dtype)
+        patches = extract_fractional_patches(x_padded, sampling_grid)
 
-        # Extract all lens patches simultaneously.
-        patches = extract_fractional_patches(x_padded, self.sampling_grid.to(device=x.device, dtype=x.dtype))
-        # [B, N, C, H+2p, W+2p]
-
-        patch_h = h + 2 * psf_radius
-        patch_w = w + 2 * psf_radius
-
-        assert patches.shape == (b, num_units, c, patch_h, patch_w)
-
-        # =========================
-        # Optical aberration
-        # =========================
-
-        # [B, N, C, H+2p, W+2p] -> [B*N, C, H+2p, W+2p]
-        optical_input = patches.reshape(b * num_units, c, patch_h, patch_w)
-
-        # Shared PSFs:
-        # [C, K, K] -> [C, 1, K, K]
-
-        weights = (
-            self.psfs
-            .to(device=x.device, dtype=x.dtype)
-            .unsqueeze(1)
+        patch_h = height + 2 * self.psf_radius
+        patch_w = width + 2 * self.psf_radius
+        patches = patches.reshape(
+            batch_size * self.num_units,
+            channels,
+            patch_h,
+            patch_w,
         )
 
-        optical_output = F.conv2d(
-            optical_input,
+        # conv2d computes cross-correlation; flip kernels for convolution.
+        weights = self.psfs.to(device=x.device, dtype=x.dtype).unsqueeze(1)
+        blurred = F.conv2d(
+            patches,
             weights.flip((-2, -1)),
-            groups=c,
+            groups=channels,
             padding=0,
         )
+        if blurred.shape[-2:] != (height, width):
+            raise RuntimeError("PSF convolution produced an unexpected image size.")
 
-        # Result:
-        # [B*N, C, H, W]
-
-        assert optical_output.shape[-2:] == (h, w)
-
-        patches = optical_output.reshape(b, num_units, c, h, w)
-
-        # =========================
-        # Downsampling
-        # =========================
-
-        patches = patches.reshape(b * num_units, c, h, w)
-
-        patches = F.avg_pool2d(
-            patches,
+        # Integrate each sensor pixel over its corresponding high-resolution area.
+        views = F.avg_pool2d(
+            blurred,
             kernel_size=self.downsample_factor,
-            stride=self.downsample_factor,
+            stride=self.downsample_factor)
+        if views.shape[-2:] != (self.lens_out_size, self.lens_out_size):
+            raise RuntimeError("Sensor integration produced an unexpected size.")
+
+        # Arrange the N lens views into a repeat_cnt x repeat_cnt mosaic.
+        views = views.reshape(
+            batch_size,
+            self.repeat_cnt,
+            self.repeat_cnt,
+            channels,
+            self.lens_out_size,
+            self.lens_out_size,
+        )
+        views = views.permute(0, 3, 1, 4, 2, 5).contiguous()
+        return views.reshape(
+            batch_size,
+            channels,
+            self.output_size,
+            self.output_size,
         )
 
-        assert patches.shape[-2:] == (self.lens_out_size, self.lens_out_size,)
+    def pinv(self, y: torch.Tensor) -> torch.Tensor:
+        """Apply the regularized least-squares inverse using conjugate gradients."""
+        if y.ndim != 4:
+            raise ValueError(f"Expected BCHW measurement, got {tuple(y.shape)}.")
+        batch_size, channels, height, width = y.shape
 
-        # =========================
-        # Assembly of sub-images
-        # =========================
-
-        patches = patches.reshape(b, self.repeat_cnt, self.repeat_cnt, c, self.lens_out_size, self.lens_out_size)
-        patches = patches.permute(0, 3, 1, 4, 2, 5)
-        patches = patches.contiguous().reshape(b, c, self.output_size, self.output_size)
-
-        return patches
-
-    def pinv(self, y):
-        b, c, h, w = y.shape
-
-        assert b == 1, "Current CG implementation supports batch size 1."
-        assert c == self.channels
-        assert h == w == self.output_size
+        if batch_size != 1:
+            raise ValueError("Current CG implementation supports batch size 1.")
+        if (channels, height, width) != (
+                self.channels,
+                self.output_size,
+                self.output_size,
+        ):
+            raise ValueError("Measurement shape does not match the TOMBO output shape.")
+        if self.forward_transpose is None:
+            raise RuntimeError("This TOMBO operator was initialized with build_pinv=False.")
 
         with torch.no_grad():
-            b = self.forward_transpose(y)
-            AtA_rho_fn = lambda x: self.forward_transpose(self.forward(x)) + self.rho * x
+            rhs = self.forward_transpose(y)
 
-            return cg(AtA_rho_fn, b, rtol=self.rtol, max_iter=self.max_iter)
+            def normal_operator(x: torch.Tensor) -> torch.Tensor:
+                return self.forward_transpose(self.forward(x)) + self.cg_rho * x
+
+            return cg(
+                normal_operator,
+                rhs,
+                rtol=self.cg_rtol,
+                max_iter=self.cg_max_iter,
+            )
 
 
-class Diffusion(object):
-    def __init__(self, args, config, device=None):
+# -----------------------------------------------------------------------------
+# Diffusion sampler and workflow orchestration
+# -----------------------------------------------------------------------------
+
+
+class Diffusion:
+    """Run full simulations, forward-only measurements, or reverse reconstructions."""
+
+    def __init__(self, args, config, device: torch.device | str | None = None):
         self.args = args
         self.config = config
-        if device is None:
-            device = (
-                torch.device("cuda")
-                if torch.cuda.is_available()
-                else torch.device("cpu")
-            )
-        self.device = device
+        self.device = torch.device(
+            device
+            if device is not None
+            else ("cuda" if torch.cuda.is_available() else "cpu")
+        )
 
         self.model_var_type = config.model.var_type
         betas = get_beta_schedule(
@@ -432,391 +484,811 @@ class Diffusion(object):
             beta_end=config.diffusion.beta_end,
             num_diffusion_timesteps=config.diffusion.num_diffusion_timesteps,
         )
-        betas = self.betas = torch.from_numpy(betas).float().to(self.device)
-        self.num_timesteps = betas.shape[0]
+        self.betas = torch.from_numpy(betas).float().to(self.device)
+        self.num_timesteps = self.betas.shape[0]
 
-        alphas = 1.0 - betas
-        alphas_cumprod = alphas.cumprod(dim=0)
-        alphas_cumprod_prev = torch.cat(
-            [torch.ones(1).to(device), alphas_cumprod[:-1]], dim=0
+        alphas = 1.0 - self.betas
+        alpha_bar = alphas.cumprod(dim=0)
+        alpha_bar_previous = torch.cat(
+            [self.betas.new_ones(1), alpha_bar[:-1]],
+            dim=0,
         )
-        self.alphas_cumprod_prev = alphas_cumprod_prev
-        posterior_variance = (
-                betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
-        )
+        self.alphas_cumprod_prev = alpha_bar_previous
+        posterior_variance = (self.betas * (1.0 - alpha_bar_previous) / (1.0 - alpha_bar))
+
         if self.model_var_type == "fixedlarge":
-            self.logvar = betas.log()
+            self.logvar = self.betas.log()
         elif self.model_var_type == "fixedsmall":
             self.logvar = posterior_variance.clamp(min=1e-20).log()
+        else:
+            raise ValueError(f"Unsupported model variance type: {self.model_var_type}")
 
-    def sample(self, simplified):
-        cls_fn = None
-        if self.config.model.type == 'simple':
-            model = Model(self.config)
+    # ------------------------------------------------------------------
+    # Top-level dispatch and model loading
+    # ------------------------------------------------------------------
 
-            if self.config.data.dataset == "CIFAR10":
-                name = "cifar10"
-            elif self.config.data.dataset == "LSUN":
-                name = f"lsun_{self.config.data.category}"
-            elif self.config.data.dataset == 'CelebA_HQ':
-                name = 'celeba_hq'
-            else:
-                raise ValueError
-            if name != 'celeba_hq':
-                ckpt = get_ckpt_path(f"ema_{name}", prefix=self.args.exp)
-                print("Loading checkpoint {}".format(ckpt))
-            elif name == 'celeba_hq':
-                ckpt = os.path.join(self.args.exp, "logs/celeba/celeba_hq.ckpt")
-                if not os.path.exists(ckpt):
-                    download('https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/celeba_hq.ckpt',
-                             ckpt)
-            else:
-                raise ValueError
-            model.load_state_dict(torch.load(ckpt, map_location=self.device))
-            model.to(self.device)
-            model = torch.nn.DataParallel(model)
+    def sample(self) -> None:
+        """Dispatch the workflow selected by ``args.mode``."""
 
-        elif self.config.model.type == 'openai':
-            config_dict = vars(self.config.model)
-            model = create_model(**config_dict)
-            if self.config.model.use_fp16:
-                model.convert_to_fp16()
-            if self.config.model.class_cond:
-                ckpt = os.path.join(self.args.exp, 'logs/imagenet/%dx%d_diffusion.pt' % (
-                    self.config.data.image_size, self.config.data.image_size))
-                if not os.path.exists(ckpt):
-                    download(
-                        'https://openaipublic.blob.core.windows.net/diffusion/jul-2021/%dx%d_diffusion_uncond.pt' % (
-                            self.config.data.image_size, self.config.data.image_size), ckpt)
-            else:
-                ckpt = os.path.join(self.args.exp, "logs/imagenet/256x256_diffusion_uncond.pt")
-                if not os.path.exists(ckpt):
-                    download(
-                        'https://openaipublic.blob.core.windows.net/diffusion/jul-2021/256x256_diffusion_uncond.pt',
-                        ckpt)
+        mode = str(getattr(self.args, "mode", "simulate")).lower()
+        if mode not in VALID_MODES:
+            choices = ", ".join(sorted(VALID_MODES))
+            raise ValueError(f"Unknown mode {mode!r}. Choose one of: {choices}.")
 
-            model.load_state_dict(torch.load(ckpt, map_location=self.device))
-            model.to(self.device)
-            model.eval()
-            model = torch.nn.DataParallel(model)
+        if mode == "forward":
+            self.run_forward()
+            return
 
-            if self.config.model.class_cond:
-                ckpt = os.path.join(self.args.exp, 'logs/imagenet/%dx%d_classifier.pt' % (
-                    self.config.data.image_size, self.config.data.image_size))
-                if not os.path.exists(ckpt):
-                    image_size = self.config.data.image_size
-                    download(
-                        'https://openaipublic.blob.core.windows.net/diffusion/jul-2021/%dx%d_classifier.pt' % image_size,
-                        ckpt)
-                classifier = create_classifier(**args_to_dict(self.config.classifier, classifier_defaults().keys()))
-                classifier.load_state_dict(torch.load(ckpt, map_location=self.device))
-                classifier.to(self.device)
-                if self.config.classifier.classifier_use_fp16:
-                    classifier.convert_to_fp16()
-                classifier.eval()
-                classifier = torch.nn.DataParallel(classifier)
-
-                import torch.nn.functional as F
-                def cond_fn(x, t, y):
-                    with torch.enable_grad():
-                        x_in = x.detach().requires_grad_(True)
-                        logits = classifier(x_in, t)
-                        log_probs = F.log_softmax(logits, dim=-1)
-                        selected = log_probs[range(len(logits)), y.view(-1)]
-                        return torch.autograd.grad(selected.sum(), x_in)[0] * self.config.classifier.classifier_scale
-
-                cls_fn = cond_fn
-
-        print('Run Simplified DDNM, without SVD.',
-              f'{self.config.time_travel.T_sampling} sampling steps.',
-              f'travel_length = {self.config.time_travel.travel_length},',
-              f'travel_repeat = {self.config.time_travel.travel_repeat}.',
-              f'Task: {self.args.deg}.'
-              )
-        self.simplified_ddnm_plus(model, cls_fn)
-
-    def degradate(self, x_orig, A, Ap):
-        y = A(x_orig)
-
-        if self.args.add_noise:  # for denoising test
-            y = get_gaussian_noisy_img(y, self.args.sigma_y)
-
-        Apy = Ap(y)
-        return y, Apy
-
-    def reverse(self, A, Ap, y, model):
-        args, config = self.args, self.config
-        sigma_y = args.sigma_y
-
-        # init x_T
-        x = torch.randn(
-            y.shape[0],
-            config.data.channels,
-            config.data.image_size,
-            config.data.image_size,
-            device=self.device,
+        model, classifier_fn = self._load_diffusion_model()
+        print(
+            f"Run TOMBO {mode} mode. "
+            f"{self.config.time_travel.T_sampling} sampling steps; "
+            f"travel_length={self.config.time_travel.travel_length}; "
+            f"travel_repeat={self.config.time_travel.travel_repeat}. "
+            f"Task: {self.args.deg}."
         )
 
-        with torch.no_grad():
-            skip = config.diffusion.num_diffusion_timesteps // config.time_travel.T_sampling
-            n = x.size(0)
-            x0_preds = []
-            xs = [x]
-
-            times = get_schedule_jump(config.time_travel.T_sampling,
-                                      config.time_travel.travel_length,
-                                      config.time_travel.travel_repeat,
-                                      )
-            time_pairs = list(zip(times[:-1], times[1:]))
-
-            # reverse diffusion sampling
-            for i, j in tqdm.tqdm(time_pairs):
-                i, j = i * skip, j * skip
-                if j < 0: j = -1
-
-                if j < i:  # normal sampling
-                    t = (torch.ones(n) * i).to(x.device)
-                    next_t = (torch.ones(n) * j).to(x.device)
-                    at = compute_alpha(self.betas, t.long())
-                    at_next = compute_alpha(self.betas, next_t.long())
-                    xt = xs[-1].to('cuda')
-
-                    et = model(xt, t)
-
-                    if et.size(1) == 6:
-                        et = et[:, :3]
-
-                    # Eq. 12
-                    x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
-
-                    # Eq. 19
-                    sigma_t = (1 - at_next).sqrt()
-                    if sigma_t >= at_next * sigma_y:
-                        lambda_t = 1.
-                        gamma_t = (sigma_t ** 2 - (at_next * sigma_y) ** 2).sqrt()
-                    else:
-                        lambda_t = sigma_t / (at_next * sigma_y)
-                        gamma_t = 0.
-
-                    # Eq. 17
-                    eta = self.args.eta
-                    x0_t_hat = x0_t - lambda_t * Ap(A(x0_t) - y)
-                    xt_next = at_next.sqrt() * x0_t_hat + gamma_t * (
-                            eta * torch.randn_like(x0_t) + (1 - eta ** 2) ** 0.5 * et)
-
-                    x0_preds.append(x0_t.to('cpu'))
-                    xs.append(xt_next.to('cpu'))
-                else:  # time-travel back
-                    next_t = (torch.ones(n) * j).to(x.device)
-                    at_next = compute_alpha(self.betas, next_t.long())
-                    x0_t = x0_preds[-1].to('cuda')
-
-                    xt_next = at_next.sqrt() * x0_t + torch.randn_like(x0_t) * (1 - at_next).sqrt()
-
-                    xs.append(xt_next.to('cpu'))
-
-        return xs[-1]
-
-    def simplified_ddnm_plus(self, model, cls_fn):
-        self.args.sigma_y = 2 * self.args.sigma_y  # to account for scaling to [-1,1]
-        args, config = self.args, self.config
-
-        _, test_dataset = get_dataset(args, config)
-
-        if args.subset_start >= 0 and args.subset_end > 0:
-            assert args.subset_end > args.subset_start
-            test_dataset = torch.utils.data.Subset(test_dataset, range(args.subset_start, args.subset_end))
+        if mode == "reverse":
+            self.run_reverse(model, classifier_fn)
         else:
-            args.subset_start = 0
-            args.subset_end = len(test_dataset)
+            self.run_simulation(model, classifier_fn)
 
-        print(f'Dataset has size {len(test_dataset)}')
+    def _load_diffusion_model(self):
+        """Load the configured diffusion model and optional classifier guidance."""
+        classifier_fn = None
 
-        def seed_worker(worker_id):
-            worker_seed = args.seed % 2 ** 32
+        if self.config.model.type == "simple":
+            model = Model(self.config)
+            dataset_name = self.config.data.dataset
+
+            if dataset_name == "CIFAR10":
+                checkpoint_name = "cifar10"
+            elif dataset_name == "LSUN":
+                checkpoint_name = f"lsun_{self.config.data.category}"
+            elif dataset_name == "CelebA_HQ":
+                checkpoint_name = "celeba_hq"
+            else:
+                raise ValueError(f"Unsupported dataset: {dataset_name}")
+
+            if checkpoint_name == "celeba_hq":
+                checkpoint = os.path.join(
+                    self.args.exp,
+                    "logs/celeba/celeba_hq.ckpt",
+                )
+                if not os.path.exists(checkpoint):
+                    download(
+                        "https://image-editing-test-12345.s3-us-west-2.amazonaws.com/checkpoints/celeba_hq.ckpt",
+                        checkpoint,
+                    )
+            else:
+                checkpoint = get_ckpt_path(
+                    f"ema_{checkpoint_name}",
+                    prefix=self.args.exp,
+                )
+
+            model.load_state_dict(torch.load(checkpoint, map_location=self.device))
+            model.to(self.device).eval()
+            return torch.nn.DataParallel(model), classifier_fn
+
+        if self.config.model.type != "openai":
+            raise ValueError(f"Unsupported model type: {self.config.model.type}")
+
+        model = create_model(**vars(self.config.model))
+        if self.config.model.use_fp16:
+            model.convert_to_fp16()
+
+        image_size = int(self.config.data.image_size)
+        if self.config.model.class_cond:
+            diffusion_checkpoint = os.path.join(
+                self.args.exp,
+                f"logs/imagenet/{image_size}x{image_size}_diffusion.pt",
+            )
+            if not os.path.exists(diffusion_checkpoint):
+                download(
+                    f"https://openaipublic.blob.core.windows.net/diffusion/jul-2021/{image_size}x{image_size}_diffusion_uncond.pt",
+                    diffusion_checkpoint,
+                )
+        else:
+            diffusion_checkpoint = os.path.join(
+                self.args.exp,
+                "logs/imagenet/256x256_diffusion_uncond.pt",
+            )
+            if not os.path.exists(diffusion_checkpoint):
+                download(
+                    "https://openaipublic.blob.core.windows.net/diffusion/jul-2021/256x256_diffusion_uncond.pt",
+                    diffusion_checkpoint,
+                )
+
+        model.load_state_dict(
+            torch.load(diffusion_checkpoint, map_location=self.device)
+        )
+        model.to(self.device).eval()
+        model = torch.nn.DataParallel(model)
+
+        # Kept for compatibility with the original guided-diffusion setup.
+        # The current DDNM reverse loop does not invoke classifier guidance.
+        if self.config.model.class_cond:
+            classifier_checkpoint = os.path.join(
+                self.args.exp,
+                f"logs/imagenet/{image_size}x{image_size}_classifier.pt",
+            )
+            if not os.path.exists(classifier_checkpoint):
+                download(
+                    f"https://openaipublic.blob.core.windows.net/diffusion/jul-2021/{image_size}x{image_size}_classifier.pt",
+                    classifier_checkpoint,
+                )
+
+            classifier = create_classifier(
+                **args_to_dict(
+                    self.config.classifier,
+                    classifier_defaults().keys(),
+                )
+            )
+            classifier.load_state_dict(
+                torch.load(classifier_checkpoint, map_location=self.device)
+            )
+            classifier.to(self.device)
+            if self.config.classifier.classifier_use_fp16:
+                classifier.convert_to_fp16()
+            classifier.eval()
+            classifier = torch.nn.DataParallel(classifier)
+
+            def classifier_guidance(x, timestep, labels):
+                with torch.enable_grad():
+                    x_in = x.detach().requires_grad_(True)
+                    logits = classifier(x_in, timestep)
+                    log_probs = F.log_softmax(logits, dim=-1)
+                    selected = log_probs[range(len(logits)), labels.view(-1)]
+                    gradient = torch.autograd.grad(selected.sum(), x_in)[0]
+                    return gradient * self.config.classifier.classifier_scale
+
+            classifier_fn = classifier_guidance
+
+        return model, classifier_fn
+
+    # ------------------------------------------------------------------
+    # Dataset, operator, and tensor I/O helpers
+    # ------------------------------------------------------------------
+
+    def _create_tombo_operator(self, build_pinv: bool = True):
+        tombo = TOMBOForwardOperator(
+            self.config,
+            self.args.add_noise,
+            DEFAULT_LENS_FILE,
+            self.device,
+            build_pinv=build_pinv,
+        )
+        return tombo, tombo.forward, tombo.pinv if build_pinv else None
+
+    def _get_test_loader(self, shuffle: bool = False):
+        """Create the configured test subset and deterministic data loader."""
+        _, test_dataset = get_dataset(self.args, self.config)
+        dataset_size = len(test_dataset)
+
+        def seed_worker(_) -> None:
+            worker_seed = self.args.seed % 2 ** 32
             np.random.seed(worker_seed)
             random.seed(worker_seed)
 
-        g = torch.Generator()
-        g.manual_seed(args.seed)
-        val_loader = data.DataLoader(
+        generator = torch.Generator()
+        generator.manual_seed(int(self.args.seed))
+        loader = data.DataLoader(
             test_dataset,
-            batch_size=config.sampling.batch_size,
-            shuffle=True,
-            num_workers=config.data.num_workers,
+            batch_size=int(self.config.sampling.batch_size),
+            shuffle=shuffle,
+            num_workers=int(self.config.data.num_workers),
             worker_init_fn=seed_worker,
-            generator=g,
+            generator=generator,
+        )
+        return test_dataset, loader
+
+    def _save_forward_pair(
+            self,
+            sample_dir: str | Path,
+            measurement: torch.Tensor,
+            ground_truth: torch.Tensor,
+    ) -> None:
+        """Save exact normalized tensors and display-space PNG previews."""
+        sample_dir = Path(sample_dir)
+        sample_dir.mkdir(parents=True, exist_ok=True)
+
+        measurement = measurement.detach().float().cpu()
+        ground_truth = ground_truth.detach().float().cpu()
+        torch.save(measurement, sample_dir / "measurement.pt")
+        torch.save(ground_truth, sample_dir / "ground_truth.pt")
+
+        tvu.save_image(
+            inverse_data_transform(self.config, measurement),
+            sample_dir / "y.png",
+        )
+        tvu.save_image(
+            inverse_data_transform(self.config, ground_truth),
+            sample_dir / "orig.png",
         )
 
-        # get degradation operator
-        print("args.deg:", args.deg)
-        if args.deg == 'diy_cg':
-            tombo = TOMBOForwardOperator(config, self.args.add_noise, './lenses/cellphone80deg.json', self.device)
-            A = lambda x: tombo.forward(x)
-            Ap = lambda y: tombo.pinv(y)
-        else:
-            raise NotImplementedError("degradation type not supported")
+    @staticmethod
+    def _load_tensor_file(path: str | Path) -> torch.Tensor:
+        """Load a saved tensor on CPU and normalize it to CHW layout."""
+        tensor = torch.load(path, map_location="cpu", weights_only=True)
 
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError(f"Expected a tensor in {path}, got {type(tensor).__name__}.")
+        tensor = tensor.float()
 
-        print(f'Start from {args.subset_start}')
-        idx_init = args.subset_start
-        idx_so_far = args.subset_start
-        pbar = tqdm.tqdm(val_loader)
+        if tensor.ndim == 4:
+            if tensor.shape[0] != 1:
+                raise ValueError(f"Expected batch size 1 in {path}, got {tensor.shape[0]}.")
+            tensor = tensor[0]
+        if tensor.ndim != 3:
+            raise ValueError(f"Expected a CHW or 1CHW tensor in {path}, got {tuple(tensor.shape)}.")
+        return tensor
 
-        avg_mse = 0.0
-        avg_psnr = 0.0
-        avg_lpips = 0.0
-        avg_norm_error = 0.0
+    def _load_pair_tensor(
+            self,
+            sample_dir: str | Path,
+            tensor_name: str,
+            image_name: str,
+    ) -> torch.Tensor:
+        """Load a pair tensor, falling back to its quantized PNG preview."""
+        sample_dir = Path(sample_dir)
+        tensor_path = sample_dir / tensor_name
+        if tensor_path.is_file():
+            return self._load_tensor_file(tensor_path)
 
-        avg_mse_Apy = 0.0
-        avg_psnr_Apy = 0.0
-        avg_lpips_Apy = 0.0
-        avg_norm_error_Apy = 0.0
+        image_path = sample_dir / image_name
+        if not image_path.is_file():
+            raise FileNotFoundError(f"Missing both {tensor_name} and {image_name} in {sample_dir}.")
 
-        lpips_metric = LearnedPerceptualImagePatchSimilarity(
+        image = read_image(str(image_path)).float().div_(255.0).unsqueeze(0)
+        return data_transform(self.config, image)[0].cpu()
+
+    @staticmethod
+    def _contains_saved_pair(directory: Path) -> bool:
+        has_measurement = any(
+            (directory / name).is_file()
+            for name in ("measurement.pt", "y.png")
+        )
+        has_ground_truth = any(
+            (directory / name).is_file()
+            for name in ("ground_truth.pt", "orig.png")
+        )
+        return has_measurement and has_ground_truth
+
+    @staticmethod
+    def _sample_directory_sort_key(path: Path):
+        return (0, int(path.name)) if path.name.isdigit() else (1, path.name)
+
+    # ------------------------------------------------------------------
+    # Metrics and reporting
+    # ------------------------------------------------------------------
+
+    def _make_lpips_metric(self):
+        return LearnedPerceptualImagePatchSimilarity(
             net_type="alex",
-            normalize=True
+            normalize=True,
         ).to(self.device)
 
-        for x_orig, classes in pbar:
-            x_orig = data_transform(self.config, x_orig.to(self.device))
-            y, Apy = self.degradate(x_orig, A, Ap)
+    def _compute_metrics(
+            self,
+            reference: torch.Tensor,
+            estimate: torch.Tensor,
+            lpips_metric,
+            crop_border: int = 0,
+    ) -> dict[str, torch.Tensor]:
+        """Compare two display-space BCHW tensors in [0, 1]."""
+        if reference.ndim == 3:
+            reference = reference.unsqueeze(0)
+        if estimate.ndim == 3:
+            estimate = estimate.unsqueeze(0)
+        if reference.shape != estimate.shape:
+            raise ValueError(f"Metric image shapes differ: {tuple(reference.shape)} vs {tuple(estimate.shape)}.")
 
-            x_restored = self.reverse(A, Ap, y, model)
-            x_restored = [inverse_data_transform(config, xi) for xi in x_restored]
+        if crop_border > 0 and min(reference.shape[-2:]) > 2 * crop_border:
+            reference = reference[
+                ..., crop_border:-crop_border, crop_border:-crop_border
+            ]
+            estimate = estimate[
+                ..., crop_border:-crop_border, crop_border:-crop_border
+            ]
 
-            os.makedirs(os.path.join(self.args.image_folder, f"{idx_so_far}"), exist_ok=True)
-            tvu.save_image(
-                inverse_data_transform(config, y[0]),
-                os.path.join(self.args.image_folder, f"{idx_so_far}/y.png")
+        difference = estimate - reference
+        mse = difference.square().mean()
+        psnr = 10.0 * torch.log10(1.0 / mse.clamp_min(1e-12))
+        relative_error = (
+                torch.linalg.vector_norm(difference)
+                / torch.linalg.vector_norm(reference).clamp_min(1e-12)
+        )
+
+        if reference.shape[1] == 1:
+            lpips_reference = reference.repeat(1, 3, 1, 1)
+            lpips_estimate = estimate.repeat(1, 3, 1, 1)
+        elif reference.shape[1] == 3:
+            lpips_reference = reference
+            lpips_estimate = estimate
+        else:
+            raise ValueError("LPIPS evaluation requires 1-channel or 3-channel images.")
+
+        with torch.no_grad():
+            lpips_value = lpips_metric(lpips_reference, lpips_estimate)
+        return {
+            "mse": mse,
+            "psnr": psnr,
+            "lpips": lpips_value,
+            "norm_error": relative_error,
+        }
+
+    @staticmethod
+    def _metric_values(metrics: dict[str, torch.Tensor]) -> dict[str, float]:
+        return {
+            name: float(value.detach().cpu())
+            for name, value in metrics.items()
+        }
+
+    @staticmethod
+    def _write_metrics(
+            path: str | Path,
+            sections: dict[str, dict[str, float]],
+            sample_count: int | None = None,
+    ) -> None:
+        with open(path, "w", encoding="utf-8") as output_file:
+            if sample_count is not None:
+                output_file.write(f"Number of samples={sample_count}\n\n")
+            for section_name, metrics in sections.items():
+                output_file.write(f"{section_name}:\n")
+                for metric_name, value in metrics.items():
+                    output_file.write(f"  {metric_name.upper()}={value:.8g}\n")
+                output_file.write("\n")
+
+    @staticmethod
+    def _accumulate_metrics(totals: dict[str, float], metrics: dict[str, float]) -> None:
+        for name, value in metrics.items():
+            totals[name] += value
+
+    # ------------------------------------------------------------------
+    # Forward-only and reverse-only workflows
+    # ------------------------------------------------------------------
+
+    def run_forward(self) -> None:
+        """Generate and save TOMBO measurement/ground-truth pairs."""
+        _, test_loader = self._get_test_loader(shuffle=False)
+        _, forward_operator, _ = self._create_tombo_operator(build_pinv=False)
+
+        output_root = Path(self.args.image_folder).resolve()
+        output_root.mkdir(parents=True, exist_ok=True)
+        sample_index = int(self.args.subset_start)
+        initial_index = sample_index
+
+        print(f"Forward-only mode: saving pairs to {output_root}")
+        with torch.no_grad():
+            for images, _ in tqdm.tqdm(test_loader, desc="TOMBO forward"):
+                ground_truth_batch = data_transform(
+                    self.config,
+                    images.to(self.device),
+                )
+                measurement_batch = forward_operator(ground_truth_batch)
+                if self.args.add_noise:
+                    measurement_batch = get_gaussian_noisy_img(
+                        measurement_batch,
+                        2.0 * self.args.sigma_y,
+                    )
+
+                for batch_index in range(ground_truth_batch.shape[0]):
+                    sample_dir = output_root / str(sample_index)
+                    self._save_forward_pair(
+                        sample_dir,
+                        measurement_batch[batch_index],
+                        ground_truth_batch[batch_index],
+                    )
+                    sample_index += 1
+
+        print(f"Saved {sample_index - initial_index} measurement/ground-truth pair(s).")
+
+    def run_reverse(self, model, classifier_fn=None) -> None:
+        """Load saved measurement/ground-truth pairs and reconstruct each one."""
+        del classifier_fn  # The current DDNM reverse loop does not use it.
+
+        input_root = Path(self.args.image_folder).resolve()
+        if not input_root.is_dir():
+            raise FileNotFoundError(f"Reverse input directory does not exist: {input_root}")
+
+        if self._contains_saved_pair(input_root):
+            sample_dirs = [input_root]
+        else:
+            sample_dirs = sorted(
+                [
+                    child
+                    for child in input_root.iterdir()
+                    if child.is_dir() and self._contains_saved_pair(child)
+                ],
+                key=self._sample_directory_sort_key,
             )
-            tvu.save_image(
-                inverse_data_transform(config, Apy[0]),
-                os.path.join(self.args.image_folder, f"{idx_so_far}/Apy.png")
-            )
-            tvu.save_image(
-                inverse_data_transform(config, x_orig[0]),
-                os.path.join(self.args.image_folder, f"{idx_so_far}/orig.png")
-            )
-            tvu.save_image(
-                x_restored[0],
-                os.path.join(self.args.image_folder, f"{idx_so_far}/ddnm.png")
+
+        if not sample_dirs:
+            raise FileNotFoundError(
+                "No measurement/ground-truth pairs found. Run --mode forward first, "
+                "or provide measurement.pt and ground_truth.pt (PNG previews are "
+                f"also accepted) under {input_root}."
             )
 
-            orig = inverse_data_transform(config, x_orig[0])[:, 4:252, 4:252].unsqueeze(0).to(self.device)
-            reconstructed = x_restored[0][:, 4:252, 4:252].unsqueeze(0).to(self.device)
-            diff = reconstructed - orig
+        _, forward_operator, inverse_operator = self._create_tombo_operator(build_pinv=True)
+        lpips_metric = self._make_lpips_metric()
+        metric_totals = {name: 0.0 for name in ("mse", "psnr", "lpips", "norm_error")}
 
-            Apy = inverse_data_transform(config, Apy[0])[:, 4:252, 4:252].unsqueeze(0).to(self.device)
-            diff_Apy = Apy - orig
+        for sample_dir in tqdm.tqdm(sample_dirs, desc="TOMBO reverse"):
+            measurement = self._load_pair_tensor(
+                sample_dir,
+                "measurement.pt",
+                "y.png",
+            ).unsqueeze(0).to(self.device)
+            ground_truth = self._load_pair_tensor(
+                sample_dir,
+                "ground_truth.pt",
+                "orig.png",
+            ).unsqueeze(0).to(self.device)
 
-            mse = torch.mean(diff ** 2)
-            psnr = 10 * torch.log10(1 / mse)
-            lpips = lpips_metric(orig, reconstructed)
-            norm_error = torch.norm(diff) / torch.norm(orig)
-            avg_mse += mse
-            avg_psnr += psnr
-            avg_lpips += lpips
-            avg_norm_error += norm_error
+            self._validate_pair_shapes(sample_dir, measurement, ground_truth)
+            reconstruction = self.reverse(
+                forward_operator,
+                inverse_operator,
+                measurement,
+                model,
+            ).to(self.device)
 
-            mse_Apy = torch.mean(diff_Apy ** 2)
-            psnr_Apy = 10 * torch.log10(1 / mse_Apy)
-            lpips_Apy = lpips_metric(orig, Apy)
-            norm_error_Apy = torch.norm(diff_Apy) / torch.norm(orig)
-            avg_mse_Apy += mse_Apy
-            avg_psnr_Apy += psnr_Apy
-            avg_lpips_Apy += lpips_Apy
-            avg_norm_error_Apy += norm_error_Apy
+            ground_truth_vis = inverse_data_transform(self.config, ground_truth[0])
+            measurement_vis = inverse_data_transform(self.config, measurement[0])
+            reconstruction_vis = inverse_data_transform(self.config, reconstruction[0])
 
-            with open(os.path.join(self.args.image_folder, f"{idx_so_far}/errors.txt"), mode='w') as f:
-                f.write(f"""Reconstructed:
-                MSE={mse}
-                PSNR={psnr}
-                LPIPS={lpips}
-                Norm Error={norm_error}
+            metrics = self._compute_metrics(
+                ground_truth_vis.unsqueeze(0).to(self.device),
+                reconstruction_vis.unsqueeze(0).to(self.device),
+                lpips_metric,
+            )
+            metric_values = self._metric_values(metrics)
+            self._accumulate_metrics(metric_totals, metric_values)
 
-                Apy:
-                MSE={mse_Apy}
-                PSNR={psnr_Apy}
-                LPIPS={lpips_Apy}
-                Norm Error={norm_error_Apy}
-                """)
-            idx_so_far += y.shape[0]
+            tvu.save_image(measurement_vis, sample_dir / "y.png")
+            tvu.save_image(ground_truth_vis, sample_dir / "orig.png")
+            tvu.save_image(reconstruction_vis, sample_dir / "ddnm.png")
+            self._write_metrics(
+                sample_dir / "errors.txt",
+                {"Reconstruction compared with ground truth": metric_values},
+            )
 
-            pbar.set_description("LPIPS: %.4f" % (avg_lpips / (idx_so_far - idx_init)))
+        sample_count = len(sample_dirs)
+        metric_averages = {
+            name: value / sample_count
+            for name, value in metric_totals.items()
+        }
+        self._write_metrics(
+            input_root / "reverse_errors.txt",
+            {"Average reconstruction metrics": metric_averages},
+            sample_count=sample_count,
+        )
 
-        avg_mse /= (idx_so_far - idx_init)
-        avg_psnr /= (idx_so_far - idx_init)
-        avg_lpips /= (idx_so_far - idx_init)
-        avg_norm_error /= (idx_so_far - idx_init)
+        print(f"Reconstructed {sample_count} sample(s) from {input_root}")
+        print("Average metrics: " + ", ".join(f"{name}={value:.6g}" for name, value in metric_averages.items()))
 
-        avg_mse_Apy /= (idx_so_far - idx_init)
-        avg_psnr_Apy /= (idx_so_far - idx_init)
-        avg_lpips_Apy /= (idx_so_far - idx_init)
-        avg_norm_error_Apy /= (idx_so_far - idx_init)
+    def _validate_pair_shapes(
+            self,
+            sample_dir: Path,
+            measurement: torch.Tensor,
+            ground_truth: torch.Tensor,
+    ) -> None:
+        expected_ground_truth = (
+            1,
+            int(self.config.data.channels),
+            int(self.config.data.image_size),
+            int(self.config.data.image_size),
+        )
+        expected_measurement = (
+            1,
+            int(self.config.data.channels),
+            int(self.config.ddnm.output_size),
+            int(self.config.ddnm.output_size),
+        )
+        if tuple(ground_truth.shape) != expected_ground_truth:
+            raise ValueError(
+                f"Ground truth in {sample_dir} has shape {tuple(ground_truth.shape)}; "
+                f"expected {expected_ground_truth}."
+            )
+        if tuple(measurement.shape) != expected_measurement:
+            raise ValueError(
+                f"Measurement in {sample_dir} has shape {tuple(measurement.shape)}; "
+                f"expected {expected_measurement}."
+            )
 
-        with open(os.path.join(self.args.image_folder, f"errors.txt"), mode='w') as f:
-            f.write(f"""Reconstructed:
-            Total Average MSE={avg_mse}
-            Total Average PSNR={avg_psnr}
-            Total Average LPIPS={avg_lpips}
-            Total Average Norm Error={avg_norm_error}
+    # ------------------------------------------------------------------
+    # Full simulation workflow
+    # ------------------------------------------------------------------
 
-            Apy:
-            Total Average MSE={avg_mse_Apy}
-            Total Average PSNR={avg_psnr_Apy}
-            Total Average LPIPS={avg_lpips_Apy}
-            Total Average Norm Error={avg_norm_error_Apy}
-            """)
+    def run_simulation(self, model, classifier_fn=None) -> None:
+        """Run the original end-to-end forward and DDNM reconstruction test."""
+        self.simplified_ddnm_plus(model, classifier_fn)
 
-        print("Total Average PSNR: %.2f" % avg_psnr)
-        print("Total Average LPIPS: %.2f" % avg_lpips)
-        print("Number of samples: %d" % (idx_so_far - idx_init))
+    def degradate(self, ground_truth: torch.Tensor, forward_operator, inverse_operator):
+        """Generate a measurement and its regularized pseudoinverse estimate."""
+        measurement = forward_operator(ground_truth)
+        if self.args.add_noise:
+            # sigma_y is configured in [0, 1] image units; model uses [-1, 1].
+            measurement = get_gaussian_noisy_img(
+                measurement,
+                2.0 * self.args.sigma_y,
+            )
+        initial_estimate = inverse_operator(measurement)
+        return measurement, initial_estimate
+
+    def simplified_ddnm_plus(self, model, classifier_fn=None) -> None:
+        """Run full simulation and report reconstruction and A^+y metrics."""
+        del classifier_fn  # Kept in the interface for compatibility.
+
+        test_dataset, test_loader = self._get_test_loader(shuffle=True)
+        print(f"Dataset has size {len(test_dataset)}")
+
+        _, forward_operator, inverse_operator = self._create_tombo_operator(
+            build_pinv=True
+        )
+        lpips_metric = self._make_lpips_metric()
+        output_root = Path(self.args.image_folder).resolve()
+        output_root.mkdir(parents=True, exist_ok=True)
+
+        metric_names = ("mse", "psnr", "lpips", "norm_error")
+        totals = {
+            "Reconstructed": {name: 0.0 for name in metric_names},
+            "Apy": {name: 0.0 for name in metric_names},
+        }
+
+        sample_index = int(self.args.subset_start)
+        initial_index = sample_index
+
+        progress = tqdm.tqdm(test_loader, desc="TOMBO simulation")
+        for images, _ in progress:
+            if images.shape[0] != 1:
+                raise ValueError(
+                    "The current CG/pseudoinverse implementation supports "
+                    "sampling.batch_size=1."
+                )
+
+            ground_truth = data_transform(self.config, images.to(self.device))
+            measurement, initial_estimate = self.degradate(
+                ground_truth,
+                forward_operator,
+                inverse_operator,
+            )
+            reconstruction = self.reverse(
+                forward_operator,
+                inverse_operator,
+                measurement,
+                model,
+            )
+
+            sample_dir = output_root / str(sample_index)
+            self._save_forward_pair(
+                sample_dir,
+                measurement[0],
+                ground_truth[0],
+            )
+
+            ground_truth_vis = inverse_data_transform(self.config, ground_truth[0])
+            initial_estimate_vis = inverse_data_transform(
+                self.config,
+                initial_estimate[0],
+            )
+            reconstruction_vis = inverse_data_transform(
+                self.config,
+                reconstruction[0],
+            )
+
+            tvu.save_image(initial_estimate_vis, sample_dir / "Apy.png")
+            tvu.save_image(reconstruction_vis, sample_dir / "ddnm.png")
+
+            reconstructed_metrics = self._metric_values(
+                self._compute_metrics(
+                    ground_truth_vis.unsqueeze(0).to(self.device),
+                    reconstruction_vis.unsqueeze(0).to(self.device),
+                    lpips_metric,
+                )
+            )
+            initial_metrics = self._metric_values(
+                self._compute_metrics(
+                    ground_truth_vis.unsqueeze(0).to(self.device),
+                    initial_estimate_vis.unsqueeze(0).to(self.device),
+                    lpips_metric,
+                )
+            )
+
+            self._accumulate_metrics(totals["Reconstructed"], reconstructed_metrics)
+            self._accumulate_metrics(totals["Apy"], initial_metrics)
+            self._write_metrics(
+                sample_dir / "errors.txt",
+                {
+                    "Reconstructed": reconstructed_metrics,
+                    "Apy": initial_metrics,
+                },
+            )
+
+            sample_index += 1
+            completed = sample_index - initial_index
+            progress.set_postfix(
+                lpips=f"{totals['Reconstructed']['lpips'] / completed:.4f}"
+            )
+
+        sample_count = sample_index - initial_index
+        if sample_count == 0:
+            raise RuntimeError("The selected dataset subset contained no samples.")
+
+        averages = {
+            section: {
+                name: value / sample_count
+                for name, value in metrics.items()
+            }
+            for section, metrics in totals.items()
+        }
+        self._write_metrics(
+            output_root / "errors.txt",
+            averages,
+            sample_count=sample_count,
+        )
+
+        print(f"Completed {sample_count} sample(s).")
+        print(
+            "Average reconstruction PSNR: "
+            f"{averages['Reconstructed']['psnr']:.2f} dB"
+        )
+        print(
+            "Average reconstruction LPIPS: "
+            f"{averages['Reconstructed']['lpips']:.4f}"
+        )
+
+    # ------------------------------------------------------------------
+    # DDNM reverse diffusion sampler
+    # ------------------------------------------------------------------
+
+    def reverse(self, forward_operator, inverse_operator, measurement, model):
+        """Run the DDNM+ reverse-diffusion loop for one measurement."""
+        sigma_y = 2.0 * float(self.args.sigma_y)
+        batch_size = measurement.shape[0]
+
+        x = torch.randn(
+            batch_size,
+            int(self.config.data.channels),
+            int(self.config.data.image_size),
+            int(self.config.data.image_size),
+            device=self.device,
+        )
+
+        sampling_steps = int(self.config.time_travel.T_sampling)
+        skip = self.config.diffusion.num_diffusion_timesteps // sampling_steps
+        if skip <= 0:
+            raise ValueError(
+                "T_sampling must not exceed num_diffusion_timesteps."
+            )
+
+        times = get_schedule_jump(
+            sampling_steps,
+            int(self.config.time_travel.travel_length),
+            int(self.config.time_travel.travel_repeat),
+        )
+        time_pairs = list(zip(times[:-1], times[1:]))
+        x0_predictions = []
+        states = [x]
+        eta = float(self.args.eta)
+        if not 0.0 <= eta <= 1.0:
+            raise ValueError("eta must be between 0 and 1.")
+
+        with torch.no_grad():
+            for current_step, next_step in time_pairs:
+                current_step *= skip
+                next_step *= skip
+                if next_step < 0:
+                    next_step = -1
+
+                if next_step < current_step:
+                    timestep = torch.full(
+                        (batch_size,),
+                        current_step,
+                        device=self.device,
+                        dtype=torch.float32,
+                    )
+                    next_timestep = torch.full(
+                        (batch_size,),
+                        next_step,
+                        device=self.device,
+                        dtype=torch.float32,
+                    )
+                    alpha = compute_alpha(self.betas, timestep.long())
+                    alpha_next = compute_alpha(self.betas, next_timestep.long())
+                    x_t = states[-1].to(self.device)
+
+                    noise_prediction = model(x_t, timestep)
+                    if noise_prediction.shape[1] == 6:
+                        noise_prediction = noise_prediction[:, : self.config.data.channels]
+
+                    x0 = (x_t - noise_prediction * (1.0 - alpha).sqrt()) / alpha.sqrt()
+
+                    sigma_t = (1.0 - alpha_next).sqrt()
+                    if sigma_t >= alpha_next * sigma_y:
+                        lambda_t = 1.0
+                        gamma_t = (sigma_t.square() - (alpha_next * sigma_y).square()).sqrt()
+                    else:
+                        lambda_t = sigma_t / (alpha_next * sigma_y)
+                        gamma_t = 0.0
+
+                    x0_projected = x0 - lambda_t * inverse_operator(forward_operator(x0) - measurement)
+                    x_next = alpha_next.sqrt() * x0_projected + gamma_t * (
+                                eta * torch.randn_like(x0) + math.sqrt(1.0 - eta ** 2) * noise_prediction)
+
+                    x0_predictions.append(x0.detach().cpu())
+                    states.append(x_next.detach().cpu())
+                else:
+                    next_timestep = torch.full(
+                        (batch_size,),
+                        next_step,
+                        device=self.device,
+                        dtype=torch.float32,
+                    )
+                    alpha_next = compute_alpha(self.betas, next_timestep.long())
+                    x0 = x0_predictions[-1].to(self.device)
+                    x_next = (
+                            alpha_next.sqrt() * x0
+                            + torch.randn_like(x0) * (1.0 - alpha_next).sqrt()
+                    )
+                    states.append(x_next.detach().cpu())
+
+        return states[-1]
 
 
-# Code form RePaint
-def get_schedule_jump(T_sampling, travel_length, travel_repeat):
-    jumps = {}
-    for j in range(0, T_sampling - travel_length, travel_length):
-        jumps[j] = travel_repeat - 1
+# -----------------------------------------------------------------------------
+# RePaint time-travel schedule
+# -----------------------------------------------------------------------------
 
-    t = T_sampling
-    ts = []
 
-    while t >= 1:
-        t = t - 1
-        ts.append(t)
+def get_schedule_jump(
+        sampling_steps: int,
+        travel_length: int,
+        travel_repeat: int,
+) -> list[int]:
+    """Create the RePaint schedule with forward time-travel jumps."""
+    if sampling_steps <= 0:
+        raise ValueError("sampling_steps must be positive.")
+    if travel_length <= 0:
+        raise ValueError("travel_length must be positive.")
+    if travel_repeat <= 0:
+        raise ValueError("travel_repeat must be positive.")
 
-        if jumps.get(t, 0) > 0:
-            jumps[t] = jumps[t] - 1
+    jumps = {
+        step: travel_repeat - 1
+        for step in range(0, sampling_steps - travel_length, travel_length)
+    }
+
+    timestep = sampling_steps
+    times = []
+    while timestep >= 1:
+        timestep -= 1
+        times.append(timestep)
+
+        if jumps.get(timestep, 0) > 0:
+            jumps[timestep] -= 1
             for _ in range(travel_length):
-                t = t + 1
-                ts.append(t)
+                timestep += 1
+                times.append(timestep)
 
-    ts.append(-1)
-
-    _check_times(ts, -1, T_sampling)
-    return ts
-
-
-def _check_times(times, t_0, T_sampling):
-    # Check end
-    assert times[0] > times[1], (times[0], times[1])
-
-    # Check beginning
-    assert times[-1] == -1, times[-1]
-
-    # Steplength = 1
-    for t_last, t_cur in zip(times[:-1], times[1:]):
-        assert abs(t_last - t_cur) == 1, (t_last, t_cur)
-
-    # Value range
-    for t in times:
-        assert t >= t_0, (t, t_0)
-        assert t <= T_sampling, (t, T_sampling)
+    times.append(-1)
+    _check_times(times, -1, sampling_steps)
+    return times
 
 
-def compute_alpha(beta, t):
-    beta = torch.cat([torch.zeros(1).to(beta.device), beta], dim=0)
-    a = (1 - beta).cumprod(dim=0).index_select(0, t + 1).view(-1, 1, 1, 1)
-    return a
+def _check_times(times: list[int], minimum: int, maximum: int) -> None:
+    """Validate that a RePaint schedule has unit-sized steps and valid bounds."""
+    if len(times) < 2 or times[0] <= times[1]:
+        raise ValueError(f"Invalid schedule start: {times[:2]}")
+    if times[-1] != -1:
+        raise ValueError(f"Schedule must end at -1, got {times[-1]}.")
+
+    for previous, current in zip(times[:-1], times[1:]):
+        if abs(previous - current) != 1:
+            raise ValueError(f"Schedule step must be 1: {previous} -> {current}.")
+    for timestep in times:
+        if not minimum <= timestep <= maximum:
+            raise ValueError(
+                f"Timestep {timestep} lies outside [{minimum}, {maximum}]."
+            )

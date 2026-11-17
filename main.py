@@ -1,12 +1,13 @@
 import argparse
-import traceback
-import shutil
 import logging
-import yaml
-import sys
 import os
-import torch
+import shutil
+import sys
+import traceback
+
 import numpy as np
+import torch
+import yaml
 
 # from runners.diffusion import Diffusion
 from guided_diffusion.diffusion import Diffusion
@@ -25,9 +26,6 @@ def parse_args_and_config():
     parser.add_argument("--seed", type=int, default=1234, help="Set different seeds for diverse results")
     parser.add_argument(
         "--exp", type=str, default="exp", help="Path for saving running related data."
-    )
-    parser.add_argument(
-        "--deg", type=str, required=True, help="Degradation"
     )
     parser.add_argument(
         "--path_y",
@@ -54,9 +52,6 @@ def parse_args_and_config():
         help="The folder name of samples",
     )
     parser.add_argument(
-        "--deg_scale", type=float, default=0., help="deg_scale"
-    )
-    parser.add_argument(
         "--verbose",
         type=str,
         default="info",
@@ -66,12 +61,6 @@ def parse_args_and_config():
         "--ni",
         action="store_true",
         help="No interaction. Suitable for Slurm Job launcher",
-    )
-    parser.add_argument(
-        '--subset_start', type=int, default=-1
-    )
-    parser.add_argument(
-        '--subset_end', type=int, default=-1
     )
     parser.add_argument(
         "-n",
@@ -88,6 +77,7 @@ def parse_args_and_config():
         '--mode',
         type=str,
         default='simulate',
+        choices=['simulate', 'forward', 'reverse'],
         help='simulate | forward | reverse'
     )
 
@@ -167,7 +157,7 @@ def main():
 
     try:
         runner = Diffusion(args, config)
-        runner.sample(args.simplified)
+        runner.sample()
     except Exception:
         logging.error(traceback.format_exc())
 
