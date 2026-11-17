@@ -58,11 +58,6 @@ def parse_args_and_config():
         help="Verbose level: info | debug | warning | critical",
     )
     parser.add_argument(
-        "--ni",
-        action="store_true",
-        help="No interaction. Suitable for Slurm Job launcher",
-    )
-    parser.add_argument(
         "-n",
         "--noise_type",
         type=str,
@@ -107,23 +102,6 @@ def parse_args_and_config():
     )
     if not os.path.exists(args.image_folder):
         os.makedirs(args.image_folder)
-    else:
-        overwrite = False
-        if args.ni:
-            overwrite = True
-        else:
-            response = input(
-                f"Image folder {args.image_folder} already exists. Overwrite? (Y/N)"
-            )
-            if response.upper() == "Y":
-                overwrite = True
-
-        if overwrite:
-            shutil.rmtree(args.image_folder)
-            os.makedirs(args.image_folder)
-        else:
-            print("Output image folder exists. Program halted.")
-            sys.exit(0)
 
     # add device
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
