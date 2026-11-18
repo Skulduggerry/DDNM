@@ -662,7 +662,6 @@ class Diffusion:
     def _get_test_loader(self, shuffle: bool = False):
         """Create the configured test subset and deterministic data loader."""
         _, test_dataset = get_dataset(self.args, self.config)
-        dataset_size = len(test_dataset)
 
         def seed_worker(_) -> None:
             worker_seed = self.args.seed % 2 ** 32
@@ -698,11 +697,11 @@ class Diffusion:
 
         tvu.save_image(
             inverse_data_transform(self.config, measurement),
-            sample_dir / "y.png",
+            sample_dir / "measurement.png",
         )
         tvu.save_image(
             inverse_data_transform(self.config, ground_truth),
-            sample_dir / "orig.png",
+            sample_dir / "ground_truth.png",
         )
 
     @staticmethod
@@ -745,11 +744,11 @@ class Diffusion:
     def _contains_saved_pair(directory: Path) -> bool:
         has_measurement = any(
             (directory / name).is_file()
-            for name in ("measurement.pt", "y.png")
+            for name in ("measurement.pt", "measurement.png")
         )
         has_ground_truth = any(
             (directory / name).is_file()
-            for name in ("ground_truth.pt", "orig.png")
+            for name in ("ground_truth.pt", "ground_truth.png")
         )
         return has_measurement and has_ground_truth
 
@@ -855,7 +854,6 @@ class Diffusion:
         output_root = Path(self.args.image_folder).resolve()
         output_root.mkdir(parents=True, exist_ok=True)
         sample_index = 0
-        initial_index = sample_index
 
         print(f"Forward-only mode: saving pairs to {output_root}")
         with torch.no_grad():
@@ -880,7 +878,7 @@ class Diffusion:
                     )
                     sample_index += 1
 
-        print(f"Saved {sample_index - initial_index} measurement/ground-truth pair(s).")
+        print(f"Saved {sample_index} measurement/ground-truth pair(s).")
 
     def run_reverse(self, model, classifier_fn=None) -> None:
         """Load saved measurement/ground-truth pairs and reconstruct each one."""
@@ -893,14 +891,10 @@ class Diffusion:
         if self._contains_saved_pair(input_root):
             sample_dirs = [input_root]
         else:
-            sample_dirs = sorted(
-                [
-                    child
-                    for child in input_root.iterdir()
-                    if child.is_dir() and self._contains_saved_pair(child)
-                ],
-                key=self._sample_directory_sort_key,
-            )
+            sample_dirs = sorted([child
+                                  for child in input_root.iterdir()
+                                  if child.is_dir() and self._contains_saved_pair(child)],
+                                 key=self._sample_directory_sort_key)
 
         if not sample_dirs:
             raise FileNotFoundError(
@@ -917,12 +911,12 @@ class Diffusion:
             measurement = self._load_pair_tensor(
                 sample_dir,
                 "measurement.pt",
-                "y.png",
+                "measurement.png",
             ).unsqueeze(0).to(self.device)
             ground_truth = self._load_pair_tensor(
                 sample_dir,
                 "ground_truth.pt",
-                "orig.png",
+                "ground_truth.png",
             ).unsqueeze(0).to(self.device)
 
             self._validate_pair_shapes(sample_dir, measurement, ground_truth)
@@ -945,8 +939,8 @@ class Diffusion:
             metric_values = self._metric_values(metrics)
             self._accumulate_metrics(metric_totals, metric_values)
 
-            tvu.save_image(measurement_vis, sample_dir / "y.png")
-            tvu.save_image(ground_truth_vis, sample_dir / "orig.png")
+            tvu.save_image(measurement_vis, sample_dir / "measurement.png")
+            tvu.save_image(ground_truth_vis, sample_dir / "ground_truth.png")
             tvu.save_image(reconstruction_vis, sample_dir / "ddnm.png")
             self._write_metrics(
                 sample_dir / "errors.txt",
@@ -1214,7 +1208,7 @@ class Diffusion:
 
                     x0_projected = x0 - lambda_t * inverse_operator(forward_operator(x0) - measurement)
                     x_next = alpha_next.sqrt() * x0_projected + gamma_t * (
-                                eta * torch.randn_like(x0) + math.sqrt(1.0 - eta ** 2) * noise_prediction)
+                            eta * torch.randn_like(x0) + math.sqrt(1.0 - eta ** 2) * noise_prediction)
 
                     x0_predictions.append(x0.detach().cpu())
                     states.append(x_next.detach().cpu())
