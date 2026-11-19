@@ -19,7 +19,7 @@ from functions.ckpt_util import download, get_ckpt_path
 from guided_diffusion.models import Model
 from guided_diffusion.script_util import args_to_dict, classifier_defaults, create_classifier, create_model
 
-DEFAULT_LENS_FILE = "./lenses/cellphone80deg.json"
+DEFAULT_LENS_FILE = "./lenses/edmund_65_254_tombo_lenslet.json"
 VALID_MODES = {"simulate", "forward", "reverse"}
 
 
@@ -89,18 +89,25 @@ def generate_tombo_psfs(
         lens_file: str,
         channels: int,
         kernel_size: int,
+        target_distance_mm: float,
         psf_grid_resolution: int = 256,
         model: str = "coherent",
         spp: int | None = None,
         device: torch.device | str = "cuda",
 ) -> torch.Tensor:
-    """Generate normalized, channel-specific intensity PSFs with DeepLens."""
+    """Generate normalized intensity PSFs for a target distance from the sensor.
+
+    ``target_distance_mm`` is measured from the image/sensor plane, matching
+    the z convention in the TOMBO bench plan. GeoLens points are specified
+    relative to the first (object-side) surface, so the lens-to-sensor distance
+    is subtracted before constructing the object point.
+    """
     if kernel_size <= 0 or kernel_size % 2 != 1:
         raise ValueError("kernel_size must be a positive odd integer.")
 
     wavelengths_by_channel = {
-        1: [0.588],
-        3: [0.656, 0.588, 0.486],
+        1: [0.5876],
+        3: [0.6563, 0.5876, 0.4861],
     }
     if channels not in wavelengths_by_channel:
         raise ValueError(f"Unsupported channel count for PSF generation: {channels}")
@@ -112,9 +119,21 @@ def generate_tombo_psfs(
     )
     lens.set_sensor_res((psf_grid_resolution, psf_grid_resolution))
 
+    # The bench-plan target distance z is measured from the image plane.
+    # GeoLens coordinates start at the first (object-side) surface, so convert
+    # the sensor-referenced distance to a first-surface-referenced point.
+    target_distance_mm = float(target_distance_mm)
+    if not math.isfinite(target_distance_mm) or target_distance_mm <= 0.0:
+        raise ValueError("target_distance_mm must be a finite positive distance.")
+
+    lens_to_sensor_mm = float(torch.as_tensor(lens.d_sensor).detach().cpu())
+    object_distance_from_first_surface_mm = target_distance_mm - lens_to_sensor_mm
+    if object_distance_from_first_surface_mm <= 0.0:
+        raise ValueError(f"target_distance_mm must exceed the lens-to-sensor distance ({lens_to_sensor_mm:.6f} mm).")
+
     # Current TOMBO setup assumes identical, centered lens units.
     field_point = torch.tensor(
-        [0.0, 0.0, -10000.0],
+        [0.0, 0.0, -object_distance_from_first_surface_mm],
         device=device,
         dtype=torch.float64,
     )
@@ -208,9 +227,7 @@ def cg(
         if not torch.isfinite(new_residual_sq):
             break
 
-        direction = residual + (
-                new_residual_sq / residual_sq.clamp_min(1e-30)
-        ) * direction
+        direction = residual + (new_residual_sq / residual_sq.clamp_min(1e-30)) * direction
         residual_sq = new_residual_sq
 
     return solution
@@ -239,7 +256,6 @@ class TOMBOForwardOperator:
         self.dtype = dtype
 
         self.repeat_cnt = int(config.ddnm.repeat_cnt)
-        self.shift = float(config.ddnm.shift)
         self.output_size = int(config.ddnm.output_size)
         self.image_size = int(config.data.image_size)
         self.channels = int(config.data.channels)
@@ -249,6 +265,11 @@ class TOMBOForwardOperator:
         self.num_units = self.repeat_cnt ** 2
         self.lens_out_size = self.output_size // self.repeat_cnt
         self.downsample_factor = self.image_size // self.lens_out_size
+
+        # Bench-plan geometry: delta = 1024/z on low resolution pixels
+        self.target_distance_mm = float(config.ddnm.target_distance_mm)
+        self.low_resolution_disparity_px = 1024.0 / self.target_distance_mm
+        self.shift = self.low_resolution_disparity_px * self.downsample_factor
 
         self.cg_rtol = float(config.ddnm.cg_rtol)
         self.cg_rho = float(config.ddnm.cg_rho) if has_noise else 0.0
@@ -273,6 +294,7 @@ class TOMBOForwardOperator:
             model=model,
             spp=spp,
             device=self.device,
+            target_distance_mm=self.target_distance_mm,
         )
         expected_psf_shape = (
             self.channels,
@@ -366,6 +388,12 @@ class TOMBOForwardOperator:
         print(f"  Extracted patch size: {self.image_size + 2 * self.psf_radius}")
         print(f"  Sensor output per unit: {self.lens_out_size}")
         print(f"  Downsampling factor: {self.downsample_factor}")
+        print(f"  Bench disparity: "
+            f"{self.low_resolution_disparity_px:.4f} LR px/unit, "
+            f"{self.shift:.4f} HR px/unit "
+            f"(sign={self.disparity_sign:+.0f})"
+        )
+        print(f"  Target distance: {self.target_distance_mm:.3f} mm from image plane")
         print(f"  PSF shape: {tuple(self.psfs.shape)}")
         print(f"  Sampling offsets: {self.offsets.cpu().tolist()}")
 
@@ -650,10 +678,13 @@ class Diffusion:
     # ------------------------------------------------------------------
 
     def _create_tombo_operator(self, build_pinv: bool = True):
+        lens_file = getattr(self.args, "lens_file", None) or DEFAULT_LENS_FILE
+        target_distance_mm = float(getattr(self.config.ddnm, "target_distance_mm", 10000.0))
+
         tombo = TOMBOForwardOperator(
             self.config,
             self.args.add_noise,
-            DEFAULT_LENS_FILE,
+            lens_file,
             self.device,
             build_pinv=build_pinv,
         )
@@ -766,8 +797,8 @@ class Diffusion:
             normalize=True,
         ).to(self.device)
 
+    @staticmethod
     def _compute_metrics(
-            self,
             reference: torch.Tensor,
             estimate: torch.Tensor,
             lpips_metric,
@@ -932,7 +963,6 @@ class Diffusion:
             reconstruction_vis = inverse_data_transform(self.config, reconstruction[0])
 
             metrics = self._compute_metrics(
-                ground_truth_vis.unsqueeze(0).to(self.device),
                 reconstruction_vis.unsqueeze(0).to(self.device),
                 lpips_metric,
             )
@@ -1076,14 +1106,12 @@ class Diffusion:
 
             reconstructed_metrics = self._metric_values(
                 self._compute_metrics(
-                    ground_truth_vis.unsqueeze(0).to(self.device),
                     reconstruction_vis.unsqueeze(0).to(self.device),
                     lpips_metric,
                 )
             )
             initial_metrics = self._metric_values(
                 self._compute_metrics(
-                    ground_truth_vis.unsqueeze(0).to(self.device),
                     initial_estimate_vis.unsqueeze(0).to(self.device),
                     lpips_metric,
                 )
@@ -1282,6 +1310,4 @@ def _check_times(times: list[int], minimum: int, maximum: int) -> None:
             raise ValueError(f"Schedule step must be 1: {previous} -> {current}.")
     for timestep in times:
         if not minimum <= timestep <= maximum:
-            raise ValueError(
-                f"Timestep {timestep} lies outside [{minimum}, {maximum}]."
-            )
+            raise ValueError(f"Timestep {timestep} lies outside [{minimum}, {maximum}].")

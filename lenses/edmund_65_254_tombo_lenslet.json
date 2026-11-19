@@ -1,0 +1,136 @@
+{
+  "info": "Edmund Optics #65-254 TOMBO lenslet model. One representative on-axis lenslet plus the bench-plan aperture stop, baffle-mask opening, FLIR cover glass, and sensor-side gap. Lengths in mm; wavelengths in um. Ideal catalog surfaces; coating losses, scatter, decenter, tilt, and array-neighbour cross-talk are not included.",
+  "foclen": 2.0,
+  "fnum": 4.0,
+  "primary_wvln": 0.5876,
+  "wvln_rgb": [
+    0.6563,
+    0.5876,
+    0.4861
+  ],
+  "obj_depth": -585.0,
+  "sensor_size": [
+    0.2208,
+    0.2208
+  ],
+  "sensor_res": [
+    256,
+    256
+  ],
+  "surfaces": [
+    {
+      "idx": 0,
+      "type": "Spheric",
+      "roc": 1.7,
+      "r": 0.75,
+      "d_next": 0.8,
+      "mat2": "N-LASF9",
+      "pos_xy": [
+        0.0,
+        0.0
+      ],
+      "vec_local": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "is_square": false
+    },
+    {
+      "idx": 1,
+      "type": "Plane",
+      "r": 0.25,
+      "d_next": 0.58,
+      "mat2": "air",
+      "pos_xy": [
+        0.0,
+        0.0
+      ],
+      "vec_local": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "is_square": false,
+      "is_aperture": true
+    },
+    {
+      "idx": 2,
+      "type": "Aperture",
+      "r": 0.65,
+      "d_next": 0.2,
+      "pos_xy": [
+        0.0,
+        0.0
+      ],
+      "vec_local": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "is_square": false
+    },
+    {
+      "idx": 3,
+      "type": "Plane",
+      "r": 0.65,
+      "d_next": 0.7,
+      "mat2": "1.5/100000",
+      "pos_xy": [
+        0.0,
+        0.0
+      ],
+      "vec_local": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "is_square": false
+    },
+    {
+      "idx": 4,
+      "type": "Plane",
+      "r": 8.5,
+      "d_next": 0.32,
+      "mat2": "air",
+      "pos_xy": [
+        0.0,
+        0.0
+      ],
+      "vec_local": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "is_square": false
+    }
+  ],
+  "tombo_model_notes": {
+    "lens": "Edmund Optics stock #65-254, uncoated plano-convex, N-LASF9",
+    "lens_orientation": "Curved face toward object; plano face toward sensor",
+    "lens_diameter_mm": 1.5,
+    "lens_center_thickness_mm": 0.8,
+    "lens_radius_of_curvature_mm": 1.7,
+    "catalog_efl_mm_at_587_6nm": 2.0,
+    "catalog_bfl_mm": 1.57,
+    "aperture_stop_diameter_mm": 0.5,
+    "aperture_stop_f_number_nominal": 4.0,
+    "lens_plano_to_mask_front_air_mm": 0.58,
+    "mask_thickness_mm": 0.2,
+    "mask_hole_diameter_mm": 1.3,
+    "cover_glass_thickness_mm": 0.7,
+    "cover_glass_nominal_refractive_index": 1.5,
+    "cover_glass_to_image_plane_air_gap_mm": 0.32,
+    "plano_to_image_plane_mechanical_distance_mm": 1.8,
+    "first_surface_to_image_plane_distance_mm": 2.6,
+    "mask_pitch_mm_for_array_context": 1.766,
+    "crop_pixels_per_lenslet": 64,
+    "camera_pixel_pitch_um": 3.45,
+    "crop_physical_width_mm": 0.2208,
+    "psf_sampling_grid": "256x256 over the 0.2208 mm crop; 4x finer than a camera pixel",
+    "cover_glass_model": "Nominal n=1.5, treated as nearly nondispersive; exact glass type not specified in the bench plan",
+    "single_lenslet_scope": "One centered channel only; the 4x4 array layout, lateral field-dependent PSFs, mask-wall scatter, and inter-unit ghost/crosstalk are not modeled",
+    "uncoated_surface_transmission_estimate": 0.829921,
+    "throughput_note": "PSFs in the current TOMBO code are normalized to unit sum. Uncoated Fresnel loss is therefore not present in the normalized PSF; the bench plan compensates primarily with exposure time."
+  }
+}

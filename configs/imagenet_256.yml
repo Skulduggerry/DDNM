@@ -1,8 +1,8 @@
 ddnm:
-    output_size: 256
     repeat_cnt: 4
-    shift: 1
+    target_distance_mm: 585.0
     kernel_size: 31
+    output_size: 256
 
     cg_rtol: 1e-5
     cg_rho: 5e-2

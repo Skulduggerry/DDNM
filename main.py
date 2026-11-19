@@ -1,7 +1,6 @@
 import argparse
 import logging
 import os
-import shutil
 import sys
 import traceback
 
@@ -40,29 +39,11 @@ def parse_args_and_config():
         "--eta", type=float, default=0.85, help="Eta"
     )
     parser.add_argument(
-        "--simplified",
-        action="store_true",
-        help="Use simplified DDNM, without SVD",
-    )
-    parser.add_argument(
         "-i",
         "--image_folder",
         type=str,
         default="images",
         help="The folder name of samples",
-    )
-    parser.add_argument(
-        "--verbose",
-        type=str,
-        default="info",
-        help="Verbose level: info | debug | warning | critical",
-    )
-    parser.add_argument(
-        "-n",
-        "--noise_type",
-        type=str,
-        default="gaussian",
-        help="gaussian | 3d_gaussian | poisson | speckle"
     )
     parser.add_argument(
         "--add_noise",
@@ -82,19 +63,6 @@ def parse_args_and_config():
     with open(os.path.join("configs", args.config), "r") as f:
         config = yaml.safe_load(f)
     new_config = dict2namespace(config)
-
-    level = getattr(logging, args.verbose.upper(), None)
-    if not isinstance(level, int):
-        raise ValueError("level {} not supported".format(args.verbose))
-
-    handler1 = logging.StreamHandler()
-    formatter = logging.Formatter(
-        "%(levelname)s - %(filename)s - %(asctime)s - %(message)s"
-    )
-    handler1.setFormatter(formatter)
-    logger = logging.getLogger()
-    logger.addHandler(handler1)
-    logger.setLevel(level)
 
     os.makedirs(os.path.join(args.exp, "image_samples"), exist_ok=True)
     args.image_folder = os.path.join(
