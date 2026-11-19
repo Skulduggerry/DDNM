@@ -391,7 +391,6 @@ class TOMBOForwardOperator:
         print(f"  Bench disparity: "
             f"{self.low_resolution_disparity_px:.4f} LR px/unit, "
             f"{self.shift:.4f} HR px/unit "
-            f"(sign={self.disparity_sign:+.0f})"
         )
         print(f"  Target distance: {self.target_distance_mm:.3f} mm from image plane")
         print(f"  PSF shape: {tuple(self.psfs.shape)}")
