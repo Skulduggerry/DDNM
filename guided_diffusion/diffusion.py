@@ -118,7 +118,7 @@ def generate_tombo_psfs(
         dtype=torch.float64,
     )
     lens.set_sensor_res((psf_grid_resolution, psf_grid_resolution))
-    lens.draw_layout(filename="./exp/image_samples/lens_layout.png", depth=float("inf"))
+    #lens.draw_layout(filename="./exp/image_samples/lens_layout.png", depth=float("inf"))
 
     # The bench-plan target distance z is measured from the image plane.
     # GeoLens coordinates start at the first (object-side) surface, so convert
