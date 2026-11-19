@@ -267,9 +267,11 @@ class TOMBOForwardOperator:
         self.downsample_factor = self.image_size // self.lens_out_size
 
         # Bench-plan geometry: delta = 1024/z on low resolution pixels
+        # Shift is clamped to an int! This is a problem if we have a shift that is not multiple of 1/4
+        # TODO: fix this
         self.target_distance_mm = float(config.ddnm.target_distance_mm)
         self.low_resolution_disparity_px = 1024.0 / self.target_distance_mm
-        self.shift = self.low_resolution_disparity_px * self.downsample_factor
+        self.shift = int(self.low_resolution_disparity_px * self.downsample_factor)
 
         self.cg_rtol = float(config.ddnm.cg_rtol)
         self.cg_rho = float(config.ddnm.cg_rho) if has_noise else 0.0
@@ -962,6 +964,7 @@ class Diffusion:
             reconstruction_vis = inverse_data_transform(self.config, reconstruction[0])
 
             metrics = self._compute_metrics(
+                ground_truth_vis.unsqueeze(0).to(self.device),
                 reconstruction_vis.unsqueeze(0).to(self.device),
                 lpips_metric,
             )
@@ -1105,12 +1108,14 @@ class Diffusion:
 
             reconstructed_metrics = self._metric_values(
                 self._compute_metrics(
+                    ground_truth_vis.unsqueeze(0).to(self.device),
                     reconstruction_vis.unsqueeze(0).to(self.device),
                     lpips_metric,
                 )
             )
             initial_metrics = self._metric_values(
                 self._compute_metrics(
+                    ground_truth_vis.unsqueeze(0).to(self.device),
                     initial_estimate_vis.unsqueeze(0).to(self.device),
                     lpips_metric,
                 )
