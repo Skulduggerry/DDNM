@@ -1,7 +1,7 @@
 ddnm:
     repeat_cnt: 4
     target_distance_mm: 585.0
-    kernel_size: 31
+    kernel_size: 15
     output_size: 256
 
     cg_rtol: 1e-5
