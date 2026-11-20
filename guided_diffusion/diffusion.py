@@ -382,7 +382,6 @@ class TOMBOForwardOperator:
         print("TOMBO operator initialized:")
         print(f"  Input size: {self.image_size}")
         print(f"  Number of units: {self.num_units}")
-        print(f"  Extracted patch size: {self.image_size + 2 * self.psf_radius}")
         print(f"  Sensor output per unit: {self.lens_out_size}")
         print(f"  Downsampling factor: {self.downsample_factor}")
         print(f"  Bench disparity: "
