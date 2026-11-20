@@ -338,12 +338,10 @@ class TOMBOForwardOperator:
 
     def _make_sampling_grid(self) -> torch.Tensor:
         """Precompute the enlarged fractional sampling grid for each lens."""
-        p = self.kernel_size // 2
-        size = self.image_size
 
         yy, xx = torch.meshgrid(
-            torch.arange(-p, size + p, dtype=torch.float32, device=self.device),
-            torch.arange(-p, size + p, dtype=torch.float32, device=self.device),
+            torch.arange(self.image_size, device=self.device, dtype=torch.float32),
+            torch.arange(self.image_size, device=self.device, dtype=torch.float32),
             indexing="ij",
         )
 
@@ -351,9 +349,8 @@ class TOMBOForwardOperator:
         sample_x = xx.unsqueeze(0) + self.offsets[:, 1, None, None]
         sample_y = yy.unsqueeze(0) + self.offsets[:, 0, None, None]
 
-        # Normalize relative to the ACTUAL input dimensions.
-        grid_x = 2.0 * sample_x / (size - 1) - 1.0
-        grid_y = 2.0 * sample_y / (size - 1) - 1.0
+        grid_x = 2.0 * sample_x / (self.image_size - 1) - 1.0
+        grid_y = 2.0 * sample_y / (self.image_size - 1) - 1.0
 
         return torch.stack([grid_x, grid_y], dim=-1)
 
@@ -397,14 +394,11 @@ class TOMBOForwardOperator:
 
         patches = extract_fractional_patches(x, self.sampling_grid)
 
-        patch_h = height + self.kernel_size - 1
-        patch_w = width + self.kernel_size - 1
-
         patches = patches.reshape(
             batch_size * self.num_units,
             channels,
-            patch_h,
-            patch_w,
+            height,
+            width,
         )
 
         # conv2d computes cross-correlation; flip kernels for convolution.
@@ -413,7 +407,7 @@ class TOMBOForwardOperator:
             patches,
             weights.flip((-2, -1)),
             groups=channels,
-            padding=0,
+            padding='same',
         )
         if blurred.shape[-2:] != (height, width):
             raise RuntimeError("PSF convolution produced an unexpected image size.")
