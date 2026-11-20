@@ -293,7 +293,7 @@ class TOMBOForwardOperator:
             spp=spp,
             device=self.device,
             target_distance_mm=self.target_distance_mm,
-        )
+        ).to(device=device, dtype=dtype)
         expected_psf_shape = (
             self.channels,
             self.kernel_size,
@@ -338,30 +338,23 @@ class TOMBOForwardOperator:
 
     def _make_sampling_grid(self) -> torch.Tensor:
         """Precompute the enlarged fractional sampling grid for each lens."""
-        margin = math.ceil(abs(self.shift) * (self.repeat_cnt - 1) / 2.0)
-        padded_size = self.image_size + 2 * margin
+        p = self.kernel_size // 2
+        size = self.image_size
 
         yy, xx = torch.meshgrid(
-            torch.arange(
-                0,
-                self.image_size,
-                dtype=torch.float32,
-                device=self.device,
-            ),
-            torch.arange(
-                0,
-                self.image_size,
-                dtype=torch.float32,
-                device=self.device,
-            ),
+            torch.arange(-p, size + p, dtype=torch.float32, device=self.device),
+            torch.arange(-p, size + p, dtype=torch.float32, device=self.device),
             indexing="ij",
         )
 
-        grid_x = xx.unsqueeze(0) + self.offsets[:, 1, None, None] + margin
-        grid_y = yy.unsqueeze(0) + self.offsets[:, 0, None, None] + margin
+        # Shift in original-image pixel coordinates.
+        sample_x = xx.unsqueeze(0) + self.offsets[:, 1, None, None]
+        sample_y = yy.unsqueeze(0) + self.offsets[:, 0, None, None]
 
-        grid_x = 2.0 * grid_x / (padded_size - 1) - 1.0
-        grid_y = 2.0 * grid_y / (padded_size - 1) - 1.0
+        # Normalize relative to the ACTUAL input dimensions.
+        grid_x = 2.0 * sample_x / (size - 1) - 1.0
+        grid_y = 2.0 * sample_y / (size - 1) - 1.0
+
         return torch.stack([grid_x, grid_y], dim=-1)
 
     def _build_forward_transpose(self) -> None:
@@ -404,11 +397,14 @@ class TOMBOForwardOperator:
 
         patches = extract_fractional_patches(x, self.sampling_grid)
 
+        patch_h = height + 2 * self.psf_radius
+        patch_w = width + 2 * self.psf_radius
+
         patches = patches.reshape(
             batch_size * self.num_units,
             channels,
-            height,
-            width,
+            patch_h,
+            patch_w,
         )
 
         # conv2d computes cross-correlation; flip kernels for convolution.
@@ -417,7 +413,7 @@ class TOMBOForwardOperator:
             patches,
             weights.flip((-2, -1)),
             groups=channels,
-            padding='same',
+            padding=0,
         )
         if blurred.shape[-2:] != (height, width):
             raise RuntimeError("PSF convolution produced an unexpected image size.")
