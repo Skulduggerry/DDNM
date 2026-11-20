@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import torch.utils.data as data
 import torchvision.utils as tvu
 import tqdm
-#from deeplens import GeoLens
+from deeplens import GeoLens
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchvision.io import read_image
 
