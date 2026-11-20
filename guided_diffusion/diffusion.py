@@ -397,8 +397,8 @@ class TOMBOForwardOperator:
 
         patches = extract_fractional_patches(x, self.sampling_grid)
 
-        patch_h = height + 2 * self.psf_radius
-        patch_w = width + 2 * self.psf_radius
+        patch_h = height + self.kernel_size
+        patch_w = width + self.kernel_size
 
         patches = patches.reshape(
             batch_size * self.num_units,
