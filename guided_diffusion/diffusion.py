@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import torch.utils.data as data
 import torchvision.utils as tvu
 import tqdm
-from deeplens import GeoLens
+#from deeplens import GeoLens
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchvision.io import read_image
 
@@ -118,7 +118,7 @@ def generate_tombo_psfs(
         dtype=torch.float64,
     )
     lens.set_sensor_res((psf_grid_resolution, psf_grid_resolution))
-    #lens.draw_layout(filename="./exp/image_samples/lens_layout.png", depth=float("inf"))
+    # lens.draw_layout(filename="./exp/image_samples/lens_layout.png", depth=float("inf"))
 
     # The bench-plan target distance z is measured from the image plane.
     # GeoLens coordinates start at the first (object-side) surface, so convert
@@ -190,7 +190,7 @@ def extract_fractional_patches(x: torch.Tensor, sampling_grid: torch.Tensor) -> 
         lens_inputs,
         lens_grids,
         mode="bilinear",
-        padding_mode="reflection",
+        padding_mode="zeros",
         align_corners=True,
     )
     return patches.reshape(batch_size, num_units, channels, patch_h, patch_w)
@@ -281,12 +281,7 @@ class TOMBOForwardOperator:
             raise ValueError("Invalid CG settings in config.ddnm.")
 
         self.offsets = self._make_offsets()
-        self.psf_radius = self.kernel_size // 2
-        self.max_offset = math.ceil(abs(self.shift) * (self.repeat_cnt - 1) / 2.0)
-        self.sampling_margin = self.psf_radius + self.max_offset
-        if self.sampling_margin >= self.image_size:
-            raise ValueError("The reflection-padding margin must be smaller than image_size.")
-        self.sampling_grid = self._make_sampling_grid()
+        self.sampling_grid = self._make_sampling_grid().to(device=device, dtype=dtype)
 
         # Current optical model: identical centered lens units, one PSF per color.
         self.psfs = generate_tombo_psfs(
@@ -343,20 +338,19 @@ class TOMBOForwardOperator:
 
     def _make_sampling_grid(self) -> torch.Tensor:
         """Precompute the enlarged fractional sampling grid for each lens."""
-        margin = self.sampling_margin
-        radius = self.psf_radius
+        margin = math.ceil(abs(self.shift) * (self.repeat_cnt - 1) / 2.0)
         padded_size = self.image_size + 2 * margin
 
         yy, xx = torch.meshgrid(
             torch.arange(
-                -radius,
-                self.image_size + radius,
+                0,
+                self.image_size,
                 dtype=torch.float32,
                 device=self.device,
             ),
             torch.arange(
-                -radius,
-                self.image_size + radius,
+                0,
+                self.image_size,
                 dtype=torch.float32,
                 device=self.device,
             ),
@@ -392,9 +386,9 @@ class TOMBOForwardOperator:
         print(f"  Sensor output per unit: {self.lens_out_size}")
         print(f"  Downsampling factor: {self.downsample_factor}")
         print(f"  Bench disparity: "
-            f"{self.low_resolution_disparity_px:.4f} LR px/unit, "
-            f"{self.shift:.4f} HR px/unit "
-        )
+              f"{self.low_resolution_disparity_px:.4f} LR px/unit, "
+              f"{self.shift:.4f} HR px/unit "
+              )
         print(f"  Target distance: {self.target_distance_mm:.3f} mm from image plane")
         print(f"  PSF shape: {tuple(self.psfs.shape)}")
         print(f"  Sampling offsets: {self.offsets.cpu().tolist()}")
@@ -409,18 +403,13 @@ class TOMBOForwardOperator:
         if (channels, height, width) != expected_shape:
             raise ValueError(f"Expected input shape [B, {expected_shape}], got {tuple(x.shape)}.")
 
-        margin = self.sampling_margin
-        x_padded = F.pad(x, (margin, margin, margin, margin), mode="reflect")
-        sampling_grid = self.sampling_grid.to(device=x.device, dtype=x.dtype)
-        patches = extract_fractional_patches(x_padded, sampling_grid)
+        patches = extract_fractional_patches(x, self.sampling_grid)
 
-        patch_h = height + 2 * self.psf_radius
-        patch_w = width + 2 * self.psf_radius
         patches = patches.reshape(
             batch_size * self.num_units,
             channels,
-            patch_h,
-            patch_w,
+            height,
+            width,
         )
 
         # conv2d computes cross-correlation; flip kernels for convolution.
@@ -429,7 +418,7 @@ class TOMBOForwardOperator:
             patches,
             weights.flip((-2, -1)),
             groups=channels,
-            padding=0,
+            padding='same',
         )
         if blurred.shape[-2:] != (height, width):
             raise RuntimeError("PSF convolution produced an unexpected image size.")
