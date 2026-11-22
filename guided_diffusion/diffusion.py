@@ -261,6 +261,8 @@ class TOMBOForwardOperator:
         self.image_size = int(config.data.image_size)
         self.channels = int(config.data.channels)
         self.kernel_size = int(config.ddnm.kernel_size)
+        if self.kernel_size < 1 or self.kernel_size % 2 == 0:
+            raise ValueError("Kernel size must be a positive, odd integer")
 
         self._validate_config()
         self.num_units = self.repeat_cnt ** 2
