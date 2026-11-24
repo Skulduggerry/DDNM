@@ -56,6 +56,13 @@ def parse_args_and_config():
         choices=['simulate', 'forward', 'reverse'],
         help='simulate | forward | reverse'
     )
+    parser.add_argument(
+        '--convolution_method',
+        type=str,
+        default='fft',
+        choices=['fft', 'conv2d'],
+        help='fft | conv2d'
+    )
 
     args = parser.parse_args()
 

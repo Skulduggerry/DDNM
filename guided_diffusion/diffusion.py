@@ -246,6 +246,7 @@ class TOMBOForwardOperator:
             self,
             config,
             has_noise: bool,
+            convolution_method,
             lens_file: str = DEFAULT_LENS_FILE,
             device: torch.device | str = "cuda",
             dtype: torch.dtype = torch.float32,
@@ -261,8 +262,10 @@ class TOMBOForwardOperator:
         self.image_size = int(config.data.image_size)
         self.channels = int(config.data.channels)
         self.kernel_size = int(config.ddnm.kernel_size)
-        if self.kernel_size < 1 or self.kernel_size % 2 == 0:
-            raise ValueError("Kernel size must be a positive, odd integer")
+
+        self.convolution_method = convolution_method
+        if self.convolution_method != 'fft' and self.convolution_method != 'conv2d':
+            raise ValueError(f"Invalid convolution method '{convolution_method}'. Use 'fft' or 'conv2d'")
 
         self._validate_config()
         self.num_units = self.repeat_cnt ** 2
@@ -280,8 +283,6 @@ class TOMBOForwardOperator:
         self.cg_rtol = float(config.ddnm.cg_rtol)
         self.cg_rho = float(config.ddnm.cg_rho) if has_noise else 0.0
         self.cg_max_iter = int(config.ddnm.cg_max_iter)
-        if self.cg_rtol < 0 or self.cg_rho < 0 or self.cg_max_iter <= 0:
-            raise ValueError("Invalid CG settings in config.ddnm.")
 
         self.offsets = self._make_offsets()
         self.sampling_grid = self._make_sampling_grid().to(device=device, dtype=dtype)
@@ -318,6 +319,8 @@ class TOMBOForwardOperator:
             raise ValueError("kernel_size must be a positive odd integer.")
         if self.output_size % self.repeat_cnt != 0:
             raise ValueError("output_size must be divisible by repeat_cnt.")
+        if self.cg_rtol < 0 or self.cg_rho < 0 or self.cg_max_iter <= 0:
+            raise ValueError("Invalid setting for CG algorithm.")
 
         if self.output_size <= 0 or self.image_size <= 0:
             raise ValueError("image_size and output_size must be positive.")
@@ -409,27 +412,39 @@ class TOMBOForwardOperator:
             patch_w,
         )
 
-        fft_h = 1 << (patch_h + self.kernel_size - 2).bit_length()
-        fft_w = 1 << (patch_w + self.kernel_size - 2).bit_length()
-        patches_fft = torch.fft.rfft2(
-            patches,
-            s=(fft_h, fft_w),
-            dim=(-2, -1)
-        )
+        if convolution_method == 'fft':
+            fft_h = 1 << (patch_h + self.kernel_size - 2).bit_length()
+            fft_w = 1 << (patch_w + self.kernel_size - 2).bit_length()
+            patches_fft = torch.fft.rfft2(
+                patches,
+                s=(fft_h, fft_w),
+                dim=(-2, -1)
+            )
 
-        weights = self.psfs.to(device=x.device, dtype=x.dtype).unsqueeze(0)
-        weights_fft = torch.fft.rfft2(
-            weights,
-            s=(fft_h, fft_w),
-            dim=(-2, -1)
-        )
+            weights = self.psfs.to(device=x.device, dtype=x.dtype).unsqueeze(0)
+            weights_fft = torch.fft.rfft2(
+                weights,
+                s=(fft_h, fft_w),
+                dim=(-2, -1)
+            )
 
-        blurred_fft = patches_fft * weights_fft
-        blurred = torch.fft.irfft2(
-            blurred_fft,
-            s=(fft_h, fft_w),
-            dim=(-2, -1),
-        )[..., self.kernel_size - 1:self.kernel_size - 1 + height, self.kernel_size - 1:self.kernel_size - 1 + width]
+            blurred_fft = patches_fft * weights_fft
+            blurred = torch.fft.irfft2(
+                blurred_fft,
+                s=(fft_h, fft_w),
+                dim=(-2, -1),
+            )[
+                ..., self.kernel_size - 1:self.kernel_size - 1 + height, self.kernel_size - 1:self.kernel_size - 1 + width]
+        elif convolution_method == 'conv2d':
+            weights = self.psfs.to(device=x.device, dtype=x.dtype).unsqueeze(1)
+            blurred = F.conv2d(
+                patches,
+                weights.flip((-2, -1)),
+                groups=channels,
+                padding=0,
+            )
+        else:
+            raise ValueError("Convolution method must be either fft or conv2d")
 
         if blurred.shape[-2:] != (height, width):
             raise RuntimeError("PSF convolution produced an unexpected image size.")
@@ -684,10 +699,11 @@ class Diffusion:
         target_distance_mm = float(getattr(self.config.ddnm, "target_distance_mm", 10000.0))
 
         tombo = TOMBOForwardOperator(
-            self.config,
-            self.args.add_noise,
-            lens_file,
-            self.device,
+            config=self.config,
+            has_noise=self.args.add_noise,
+            convolution_method=self.args.convolution_method,
+            lens_file=lens_file,
+            device=self.device,
             build_pinv=build_pinv,
         )
         return tombo, tombo.forward, tombo.pinv if build_pinv else None
