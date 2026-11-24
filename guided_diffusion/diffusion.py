@@ -412,7 +412,7 @@ class TOMBOForwardOperator:
             patch_w,
         )
 
-        if convolution_method == 'fft':
+        if self.convolution_method == 'fft':
             fft_h = 1 << (patch_h + self.kernel_size - 2).bit_length()
             fft_w = 1 << (patch_w + self.kernel_size - 2).bit_length()
             patches_fft = torch.fft.rfft2(
@@ -435,7 +435,7 @@ class TOMBOForwardOperator:
                 dim=(-2, -1),
             )[
                 ..., self.kernel_size - 1:self.kernel_size - 1 + height, self.kernel_size - 1:self.kernel_size - 1 + width]
-        elif convolution_method == 'conv2d':
+        elif self.convolution_method == 'conv2d':
             weights = self.psfs.to(device=x.device, dtype=x.dtype).unsqueeze(1)
             blurred = F.conv2d(
                 patches,
