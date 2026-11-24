@@ -409,15 +409,15 @@ class TOMBOForwardOperator:
             patch_w,
         )
 
-        fft_h = 1 << (patch_h + self.kernel_size - 2).bit_count()
-        fft_w = 1 << (patch_h + self.kernel_size - 2).bit_count()
+        fft_h = 1 << (patch_h + self.kernel_size - 2).bit_length()
+        fft_w = 1 << (patch_w + self.kernel_size - 2).bit_length()
         patches_fft = torch.fft.rfft2(
             patches,
             s=(fft_h, fft_w),
             dim=(-2, -1)
         )
 
-        weights = self.psfs.to(device=x.device, dtype=x.dtype).unsqueeze(1)
+        weights = self.psfs.to(device=x.device, dtype=x.dtype).unsqueeze(0)
         weights_fft = torch.fft.rfft2(
             weights,
             s=(fft_h, fft_w),
