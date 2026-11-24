@@ -263,6 +263,10 @@ class TOMBOForwardOperator:
         self.channels = int(config.data.channels)
         self.kernel_size = int(config.ddnm.kernel_size)
 
+        self.cg_rtol = float(config.ddnm.cg_rtol)
+        self.cg_rho = float(config.ddnm.cg_rho) if has_noise else 0.0
+        self.cg_max_iter = int(config.ddnm.cg_max_iter)
+
         self.convolution_method = convolution_method
         if self.convolution_method != 'fft' and self.convolution_method != 'conv2d':
             raise ValueError(f"Invalid convolution method '{convolution_method}'. Use 'fft' or 'conv2d'")
@@ -279,10 +283,6 @@ class TOMBOForwardOperator:
         self.low_resolution_disparity_px = 1024.0 / self.target_distance_mm
         self.psf_radius = int(self.kernel_size) // 2
         self.shift = int(self.low_resolution_disparity_px * self.downsample_factor)
-
-        self.cg_rtol = float(config.ddnm.cg_rtol)
-        self.cg_rho = float(config.ddnm.cg_rho) if has_noise else 0.0
-        self.cg_max_iter = int(config.ddnm.cg_max_iter)
 
         self.offsets = self._make_offsets()
         self.sampling_grid = self._make_sampling_grid().to(device=device, dtype=dtype)
