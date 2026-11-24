@@ -409,14 +409,28 @@ class TOMBOForwardOperator:
             patch_w,
         )
 
-        # conv2d computes cross-correlation; flip kernels for convolution.
-        weights = self.psfs.to(device=x.device, dtype=x.dtype).unsqueeze(1)
-        blurred = F.conv2d(
+        fft_h = 1 << (patch_h + self.kernel_size - 2).bit_count()
+        fft_w = 1 << (patch_h + self.kernel_size - 2).bit_count()
+        patches_fft = torch.fft.rfft2(
             patches,
-            weights.flip((-2, -1)),
-            groups=channels,
-            padding=0,
+            s=(fft_h, fft_w),
+            dim=(-2, -1)
         )
+
+        weights = self.psfs.to(device=x.device, dtype=x.dtype).unsqueeze(1)
+        weights_fft = torch.fft.rfft2(
+            weights,
+            s=(fft_h, fft_w),
+            dim=(-2, -1)
+        )
+
+        blurred_fft = patches_fft * weights_fft
+        blurred = torch.fft.irfft2(
+            blurred_fft,
+            s=(fft_h, fft_w),
+            dim=(-2, -1),
+        )[..., self.kernel_size - 1:self.kernel_size - 1 + height, self.kernel_size - 1:self.kernel_size - 1 + width]
+
         if blurred.shape[-2:] != (height, width):
             raise RuntimeError("PSF convolution produced an unexpected image size.")
 
