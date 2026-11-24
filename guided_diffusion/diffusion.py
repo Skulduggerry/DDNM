@@ -11,6 +11,7 @@ import torch.utils.data as data
 import torchvision.utils as tvu
 import tqdm
 from deeplens import GeoLens
+from sympy.physics.units import frequency
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchvision.io import read_image
 
@@ -827,16 +828,15 @@ class Diffusion:
             reference = reference.unsqueeze(0)
         if estimate.ndim == 3:
             estimate = estimate.unsqueeze(0)
+
         if reference.shape != estimate.shape:
             raise ValueError(f"Metric image shapes differ: {tuple(reference.shape)} vs {tuple(estimate.shape)}.")
+        if reference.shape[1] != 3:
+            raise ValueError("Expected 3 color channels.")
 
         if crop_border > 0 and min(reference.shape[-2:]) > 2 * crop_border:
-            reference = reference[
-                ..., crop_border:-crop_border, crop_border:-crop_border
-            ]
-            estimate = estimate[
-                ..., crop_border:-crop_border, crop_border:-crop_border
-            ]
+            reference = reference[..., crop_border:-crop_border, crop_border:-crop_border]
+            estimate = estimate[..., crop_border:-crop_border, crop_border:-crop_border]
 
         difference = estimate - reference
         mse = difference.square().mean()
@@ -857,6 +857,7 @@ class Diffusion:
 
         with torch.no_grad():
             lpips_value = lpips_metric(lpips_reference, lpips_estimate)
+
         return {
             "mse": mse,
             "psnr": psnr,
@@ -980,19 +981,18 @@ class Diffusion:
             measurement_vis = inverse_data_transform(self.config, measurement[0])
             reconstruction_vis = inverse_data_transform(self.config, reconstruction[0])
 
-            metrics = self._compute_metrics(
+            metric_values = self._metric_values(self._compute_metrics(
                 ground_truth_vis.unsqueeze(0).to(self.device),
                 reconstruction_vis.unsqueeze(0).to(self.device),
                 lpips_metric,
-            )
-            metric_values = self._metric_values(metrics)
+            ))
             self._accumulate_metrics(metric_totals, metric_values)
 
             tvu.save_image(measurement_vis, sample_dir / "measurement.png")
             tvu.save_image(ground_truth_vis, sample_dir / "ground_truth.png")
             tvu.save_image(reconstruction_vis, sample_dir / "ddnm.png")
             self._write_metrics(
-                sample_dir / "errors.txt",
+                sample_dir / "info.txt",
                 {"Reconstruction compared with ground truth": metric_values},
             )
 
@@ -1002,7 +1002,7 @@ class Diffusion:
             for name, value in metric_totals.items()
         }
         self._write_metrics(
-            input_root / "reverse_errors.txt",
+            input_root / "reverse_info.txt",
             {"Average reconstruction metrics": metric_averages},
             sample_count=sample_count,
         )
@@ -1123,25 +1123,21 @@ class Diffusion:
             tvu.save_image(initial_estimate_vis, sample_dir / "Apy.png")
             tvu.save_image(reconstruction_vis, sample_dir / "ddnm.png")
 
-            reconstructed_metrics = self._metric_values(
-                self._compute_metrics(
-                    ground_truth_vis.unsqueeze(0).to(self.device),
-                    reconstruction_vis.unsqueeze(0).to(self.device),
-                    lpips_metric,
-                )
-            )
-            initial_metrics = self._metric_values(
-                self._compute_metrics(
-                    ground_truth_vis.unsqueeze(0).to(self.device),
-                    initial_estimate_vis.unsqueeze(0).to(self.device),
-                    lpips_metric,
-                )
-            )
+            reconstructed_metrics = self._metric_values(self._compute_metrics(
+                ground_truth_vis.unsqueeze(0).to(self.device),
+                reconstruction_vis.unsqueeze(0).to(self.device),
+                lpips_metric,
+            ))
+            initial_metrics = self._metric_values(self._compute_metrics(
+                ground_truth_vis.unsqueeze(0).to(self.device),
+                initial_estimate_vis.unsqueeze(0).to(self.device),
+                lpips_metric,
+            ))
 
             self._accumulate_metrics(totals["Reconstructed"], reconstructed_metrics)
             self._accumulate_metrics(totals["Apy"], initial_metrics)
             self._write_metrics(
-                sample_dir / "errors.txt",
+                sample_dir / "info.txt",
                 {
                     "Reconstructed": reconstructed_metrics,
                     "Apy": initial_metrics,
@@ -1166,7 +1162,7 @@ class Diffusion:
             for section, metrics in totals.items()
         }
         self._write_metrics(
-            output_root / "errors.txt",
+            output_root / "info.txt",
             averages,
             sample_count=sample_count,
         )
