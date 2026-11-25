@@ -129,6 +129,9 @@ def generate_tombo_psfs(
         raise ValueError("target_distance_mm must be a finite positive distance.")
 
     lens_to_sensor_mm = float(torch.as_tensor(lens.d_sensor).detach().cpu())
+    print("#############################")
+    print(f"Lens to sensor in mm: {lens_to_sensor_mm}")
+    print("#############################")
     object_distance_from_first_surface_mm = target_distance_mm - lens_to_sensor_mm
     if object_distance_from_first_surface_mm <= 0.0:
         raise ValueError(f"target_distance_mm must exceed the lens-to-sensor distance ({lens_to_sensor_mm:.6f} mm).")
@@ -278,12 +281,11 @@ class TOMBOForwardOperator:
         self.downsample_factor = self.image_size // self.lens_out_size
 
         # Bench-plan geometry: delta = 1024/z on low resolution pixels
-        # Shift is clamped to an int! This is a problem if we have a shift that is not multiple of 1/4
-        # TODO: fix this
+        # TODO: Shift is clamped to an int! This is a problem if we have a shift that is not multiple of 1/4
         self.target_distance_mm = float(config.ddnm.target_distance_mm)
         self.low_resolution_disparity_px = 1024.0 / self.target_distance_mm
         self.psf_radius = int(self.kernel_size) // 2
-        self.shift = int(self.low_resolution_disparity_px * self.downsample_factor)
+        self.shift = int(round(self.low_resolution_disparity_px * self.downsample_factor))
 
         self.offsets = self._make_offsets()
         self.sampling_grid = self._make_sampling_grid().to(device=device, dtype=dtype)
