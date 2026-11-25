@@ -1,7 +1,9 @@
 ddnm:
     repeat_cnt: 4
-    target_distance_mm: 585.0
     kernel_size: 15
+    target_distance_mm: 585.0
+    low_resolution_pixel_pitch_mm: 0.00345
+    focal_length_mm: 2.0
     output_size: 256
 
     cg_rtol: 1e-5

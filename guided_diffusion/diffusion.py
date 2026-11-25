@@ -129,9 +129,6 @@ def generate_tombo_psfs(
         raise ValueError("target_distance_mm must be a finite positive distance.")
 
     lens_to_sensor_mm = float(torch.as_tensor(lens.d_sensor).detach().cpu())
-    print("#############################")
-    print(f"Lens to sensor in mm: {lens_to_sensor_mm}")
-    print("#############################")
     object_distance_from_first_surface_mm = target_distance_mm - lens_to_sensor_mm
     if object_distance_from_first_surface_mm <= 0.0:
         raise ValueError(f"target_distance_mm must exceed the lens-to-sensor distance ({lens_to_sensor_mm:.6f} mm).")
@@ -280,6 +277,11 @@ class TOMBOForwardOperator:
         self.lens_out_size = self.output_size // self.repeat_cnt
         self.downsample_factor = self.image_size // self.lens_out_size
 
+        # Make vignetting map
+        self.low_resolution_pixel_pitch_mm = float(config.ddnm.low_resolution_pixel_pitch_mm)
+        self.focal_length_mm = float(config.ddnm.focal_length_mm)
+        self.vignetting_map = self._make_vignetting_map().to(device=device, dtype=dtype)
+
         # Bench-plan geometry: delta = 1024/z on low resolution pixels
         # TODO: Shift is clamped to an int! This is a problem if we have a shift that is not multiple of 1/4
         self.target_distance_mm = float(config.ddnm.target_distance_mm)
@@ -366,6 +368,18 @@ class TOMBOForwardOperator:
 
         return torch.stack([grid_x, grid_y], dim=-1)
 
+    def _make_vignetting_map(self) -> torch.Tensor:
+        pixel_pitch = self.low_resolution_pixel_pitch_mm / self.downsample_factor
+        focal_length = self.focal_length_mm
+
+        coords = (torch.arange(self.image_size, dtype=torch.float32) - (self.image_size - 1) / 2) * pixel_pitch
+        yy, xx = torch.meshgrid(coords, coords, indexing='ij')
+
+        distance_squared = yy.square() + xx.square()
+
+        vignetting = (float(focal_length ** 2) / (focal_length ** 2 + distance_squared)).square()
+        return vignetting
+
     def _build_forward_transpose(self) -> None:
         """Build the VJP of the linear forward operator, i.e. its transpose."""
         template = torch.zeros(
@@ -451,6 +465,10 @@ class TOMBOForwardOperator:
 
         if blurred.shape[-2:] != (height, width):
             raise RuntimeError("PSF convolution produced an unexpected image size.")
+
+        # simulate vignetting with cos fourth power law
+        vignetting = self.vignetting_map.to(device=x.device, dtype=x.dtype)
+        blurred = blurred * vignetting
 
         # Integrate each sensor pixel over its corresponding high-resolution area.
         views = F.avg_pool2d(
