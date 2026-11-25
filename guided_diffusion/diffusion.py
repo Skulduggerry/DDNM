@@ -859,7 +859,7 @@ class Diffusion:
         fy, fx = torch.meshgrid(fy, fx, indexing="ij")
         radius = torch.sqrt(fx.square() + fy.square())
 
-        valid = (radius > 0) & (radius <= 0.5)
+        valid = radius > 0
         high_frequency = valid & (radius >= high_frequency_threshold)
 
         total_spectral_energy = power[:, valid].sum(dim=-1)
