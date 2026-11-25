@@ -817,6 +817,62 @@ class Diffusion:
         ).to(self.device)
 
     @staticmethod
+    def _frequency_metrics(
+            image: torch.Tensor,
+            high_frequency_threshold: float = 0.25,
+            eps: float = 1e-12,
+    ) -> dict[str, torch.Tensor]:
+        if image.ndim != 4:
+            raise ValueError("Expected BCHW image tensor.")
+
+        _, channels, height, width = image.shape
+
+        if channels != 3:
+            raise ValueError("Expected 3 color channels.")
+
+        if not 0.0 <= high_frequency_threshold <= 0.5:
+            raise ValueError("high_frequency_threshold must be between 0 and 0.5.")
+
+        image_luma = 0.2126 * image[:, 0] + 0.7152 * image[:, 1] + 0.0722 * image[:, 2]
+        num_pixels = height * width
+
+        # DC / AC energy
+
+        mean = image_luma.mean(dim=(-2, -1), keepdim=True)
+        ac = image_luma - mean
+
+        dc_energy = (mean.square() * num_pixels).flatten(1).sum(dim=1)
+        ac_energy = ac.square().flatten(1).sum(dim=1)
+        total_energy = dc_energy + ac_energy
+
+        dc_ac_ratio = dc_energy / ac_energy.clamp_min(eps)
+        dc_ratio = dc_energy / total_energy.clamp_min(eps)
+
+        # High-frequency energy
+
+        spectrum = torch.fft.fft2(ac, norm="ortho")
+        power = spectrum.abs().square()
+
+        fy = torch.fft.fftfreq(height, device=image.device)
+        fx = torch.fft.fftfreq(width, device=image.device)
+
+        fy, fx = torch.meshgrid(fy, fx, indexing="ij")
+        radius = torch.sqrt(fx.square() + fy.square())
+
+        valid = (radius > 0) & (radius <= 0.5)
+        high_frequency = valid & (radius >= high_frequency_threshold)
+
+        total_spectral_energy = power[:, valid].sum(dim=-1)
+        high_frequency_energy = power[:, high_frequency].sum(dim=-1)
+        high_frequency_ratio = high_frequency_energy / total_spectral_energy.clamp_min(eps)
+
+        return {
+            "dc_energy/ac_energy": dc_ac_ratio,
+            "dc_energy/total_energy": dc_ratio,
+            "hf_ratio": high_frequency_ratio,
+        }
+
+    @staticmethod
     def _compute_metrics(
             reference: torch.Tensor,
             estimate: torch.Tensor,
@@ -858,12 +914,14 @@ class Diffusion:
         with torch.no_grad():
             lpips_value = lpips_metric(lpips_reference, lpips_estimate)
 
-        return {
+        metrics = {
             "mse": mse,
             "psnr": psnr,
             "lpips": lpips_value,
             "norm_error": relative_error,
         }
+        metrics.update(Diffusion._frequency_metrics(estimate))
+        return metrics
 
     @staticmethod
     def _metric_values(metrics: dict[str, torch.Tensor]) -> dict[str, float]:
@@ -955,7 +1013,13 @@ class Diffusion:
 
         _, forward_operator, inverse_operator = self._create_tombo_operator(build_pinv=True)
         lpips_metric = self._make_lpips_metric()
-        metric_totals = {name: 0.0 for name in ("mse", "psnr", "lpips", "norm_error")}
+
+        frequency_metric_names = ("dc_energy/ac_energy", "dc_energy/total_energy", "hf_ratio")
+        metric_names = ("mse", "psnr", "lpips", "norm_error", *frequency_metric_names)
+        totals = {
+            "Ground Truth": {name: 0.0 for name in frequency_metric_names},
+            "Reconstructed": {name: 0.0 for name in metric_names},
+        }
 
         for sample_dir in tqdm.tqdm(sample_dirs, desc="TOMBO reverse"):
             measurement = self._load_pair_tensor(
@@ -981,34 +1045,52 @@ class Diffusion:
             measurement_vis = inverse_data_transform(self.config, measurement[0])
             reconstruction_vis = inverse_data_transform(self.config, reconstruction[0])
 
-            metric_values = self._metric_values(self._compute_metrics(
+            ground_truth_metrics = self._metric_values(self._frequency_metrics(
+                ground_truth_vis.unsqueeze(0).to(self.device)
+            ))
+            reconstructed_metrics = self._metric_values(self._compute_metrics(
                 ground_truth_vis.unsqueeze(0).to(self.device),
                 reconstruction_vis.unsqueeze(0).to(self.device),
                 lpips_metric,
             ))
-            self._accumulate_metrics(metric_totals, metric_values)
+
+            self._accumulate_metrics(totals["Ground Truth"], ground_truth_metrics)
+            self._accumulate_metrics(totals["Reconstructed"], reconstructed_metrics)
+            self._write_metrics(
+                sample_dir / "reverse_info.txt",
+                {
+                    "Ground Truth": ground_truth_metrics,
+                    "Reconstructed": reconstructed_metrics,
+                },
+            )
 
             tvu.save_image(measurement_vis, sample_dir / "measurement.png")
             tvu.save_image(ground_truth_vis, sample_dir / "ground_truth.png")
             tvu.save_image(reconstruction_vis, sample_dir / "ddnm.png")
-            self._write_metrics(
-                sample_dir / "info.txt",
-                {"Reconstruction compared with ground truth": metric_values},
-            )
 
         sample_count = len(sample_dirs)
-        metric_averages = {
-            name: value / sample_count
-            for name, value in metric_totals.items()
+        averages = {
+            section: {
+                name: value / sample_count
+                for name, value in metrics.items()
+            }
+            for section, metrics in totals.items()
         }
         self._write_metrics(
             input_root / "reverse_info.txt",
-            {"Average reconstruction metrics": metric_averages},
+            averages,
             sample_count=sample_count,
         )
 
         print(f"Reconstructed {sample_count} sample(s) from {input_root}")
-        print("Average metrics: " + ", ".join(f"{name}={value:.6g}" for name, value in metric_averages.items()))
+        print(
+            "Average reconstruction PSNR: "
+            f"{averages['Reconstructed']['psnr']:.2f} dB"
+        )
+        print(
+            "Average reconstruction LPIPS: "
+            f"{averages['Reconstructed']['lpips']:.4f}"
+        )
 
     def _validate_pair_shapes(
             self,
@@ -1073,8 +1155,10 @@ class Diffusion:
         output_root = Path(self.args.image_folder).resolve()
         output_root.mkdir(parents=True, exist_ok=True)
 
-        metric_names = ("mse", "psnr", "lpips", "norm_error")
+        frequency_metric_names = ("dc_energy/ac_energy", "dc_energy/total_energy", "hf_ratio")
+        metric_names = ("mse", "psnr", "lpips", "norm_error", *frequency_metric_names)
         totals = {
+            "Ground Truth": {name: 0.0 for name in frequency_metric_names},
             "Reconstructed": {name: 0.0 for name in metric_names},
             "Apy": {name: 0.0 for name in metric_names},
         }
@@ -1123,6 +1207,9 @@ class Diffusion:
             tvu.save_image(initial_estimate_vis, sample_dir / "Apy.png")
             tvu.save_image(reconstruction_vis, sample_dir / "ddnm.png")
 
+            ground_truth_metrics = self._metric_values(self._frequency_metrics(
+                ground_truth_vis.unsqueeze(0).to(self.device)
+            ))
             reconstructed_metrics = self._metric_values(self._compute_metrics(
                 ground_truth_vis.unsqueeze(0).to(self.device),
                 reconstruction_vis.unsqueeze(0).to(self.device),
@@ -1134,11 +1221,13 @@ class Diffusion:
                 lpips_metric,
             ))
 
+            self._accumulate_metrics(totals["Ground Truth"], ground_truth_metrics)
             self._accumulate_metrics(totals["Reconstructed"], reconstructed_metrics)
             self._accumulate_metrics(totals["Apy"], initial_metrics)
             self._write_metrics(
                 sample_dir / "info.txt",
                 {
+                    "Ground Truth": ground_truth_metrics,
                     "Reconstructed": reconstructed_metrics,
                     "Apy": initial_metrics,
                 },
@@ -1146,9 +1235,7 @@ class Diffusion:
 
             sample_index += 1
             completed = sample_index - initial_index
-            progress.set_postfix(
-                lpips=f"{totals['Reconstructed']['lpips'] / completed:.4f}"
-            )
+            progress.set_postfix(lpips=f"{totals['Reconstructed']['lpips'] / completed:.4f}")
 
         sample_count = sample_index - initial_index
         if sample_count == 0:
