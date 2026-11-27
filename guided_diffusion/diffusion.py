@@ -717,7 +717,6 @@ class Diffusion:
 
     def _create_tombo_operator(self, build_pinv: bool = True):
         lens_file = getattr(self.args, "lens_file", None) or DEFAULT_LENS_FILE
-        target_distance_mm = float(getattr(self.config.ddnm, "target_distance_mm", 10000.0))
 
         tombo = TOMBOForwardOperator(
             config=self.config,
@@ -970,6 +969,12 @@ class Diffusion:
         for name, value in metrics.items():
             totals[name] += value
 
+    def _to_physical(self, x: torch.Tensor):
+        return (x + 1) / 2 if self.config.data.rescaled else x
+
+    def _to_diffusion(self, x: torch.Tensor):
+        return x * 2 - 1 if self.config.data.rescaled else x
+
     # ------------------------------------------------------------------
     # Forward-only and reverse-only workflows
     # ------------------------------------------------------------------
@@ -990,7 +995,10 @@ class Diffusion:
                     self.config,
                     images.to(self.device),
                 )
-                measurement_batch = forward_operator(ground_truth_batch)
+
+                measurement_batch = forward_operator(self._to_physical(ground_truth_batch))
+                measurement_batch = self._to_diffusion(measurement_batch)
+
                 if self.args.add_noise:
                     measurement_batch = get_gaussian_noisy_img(
                         measurement_batch,
@@ -1151,7 +1159,8 @@ class Diffusion:
 
     def degradate(self, ground_truth: torch.Tensor, forward_operator, inverse_operator):
         """Generate a measurement and its regularized pseudoinverse estimate."""
-        measurement = forward_operator(ground_truth)
+        measurement = forward_operator(self._to_physical(ground_truth))
+        measurement = self._to_diffusion(measurement)
         if self.args.add_noise:
             # sigma_y is configured in [0, 1] image units; model uses [-1, 1].
             measurement = get_gaussian_noisy_img(
@@ -1358,7 +1367,9 @@ class Diffusion:
                         lambda_t = sigma_t / (alpha_next * sigma_y)
                         gamma_t = 0.0
 
-                    x0_projected = x0 - lambda_t * inverse_operator(forward_operator(x0) - measurement)
+                    x0_projected = x0 - lambda_t * self._to_diffusion(inverse_operator(
+                        forward_operator(self._to_physical(x0)) - self._to_physical(measurement)
+                    ))
                     x_next = alpha_next.sqrt() * x0_projected + gamma_t * (
                             eta * torch.randn_like(x0) + math.sqrt(1.0 - eta ** 2) * noise_prediction)
 
