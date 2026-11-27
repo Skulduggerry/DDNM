@@ -1367,9 +1367,12 @@ class Diffusion:
                         lambda_t = sigma_t / (alpha_next * sigma_y)
                         gamma_t = 0.0
 
-                    x0_projected = x0 - lambda_t * self._to_diffusion(inverse_operator(
-                        forward_operator(self._to_physical(x0)) - self._to_physical(measurement)
-                    ))
+                    residual = forward_operator(self._to_physical(x0)) - self._to_physical(measurement)
+                    correction = inverse_operator(residual)
+                    if self.config.data.rescaled:
+                        correction = 2 * correction
+
+                    x0_projected = x0 - lambda_t * correction
                     x_next = alpha_next.sqrt() * x0_projected + gamma_t * (
                             eta * torch.randn_like(x0) + math.sqrt(1.0 - eta ** 2) * noise_prediction)
 
